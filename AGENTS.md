@@ -10,7 +10,8 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 ## Layout
 
 - `cmd/opentofu-gpg-key-provider`: thin executable entry point and build version.
-- `internal/cli`: argument parsing, request timeout, exit codes, and diagnostics.
+- `internal/cli`: argument parsing, GPG operation timeout, exit codes, and
+  diagnostics.
 - `internal/provider`: protocol exchange, metadata, and data-key lifecycle.
 - `internal/gpg`: direct GnuPG subprocess invocation and machine-status checks.
 - `integration`: executable-level tests with real GPG and OpenTofu.
@@ -39,7 +40,8 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 - Invoke `gpg` directly with separate arguments through `exec.CommandContext`.
   Keep its output separate from the OpenTofu protocol stream.
 - Let GPG resolve its home and read `gpg.conf`. The provider does not parse that
-  configuration or invoke `gpgconf`.
+  configuration or invoke `gpgconf`. Override text mode so binary data keys
+  round-trip unchanged.
 - Recipients are optional and repeatable. Explicit recipients override GPG's
   default recipient; otherwise GPG applies `default-recipient` or
   `default-recipient-self`. Preserve configured `encrypt-to` recipients and GPG's
@@ -48,8 +50,9 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
   hardware-token policy belong to GnuPG. Passphrase inputs are outside the CLI's
   scope.
 - Require successful integrity-protected public-key decryption, using GPG's
-  machine-readable status as well as its exit code. GPG can successfully unpack
-  an unencrypted literal packet, which must not be accepted as a wrapped key.
+  machine-readable status as well as its exit code. Require positive integrity
+  verification for both MDC and AEAD. GPG can successfully unpack an unencrypted
+  literal packet, which must not be accepted as a wrapped key.
 - Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
   diagnostic output containing session keys when `show-session-key` is enabled.
 - OpenTofu imposes a one-minute external-provider timeout in versions 1.12/1.13;
@@ -72,7 +75,8 @@ goreleaser check
 goreleaser build --snapshot --clean
 ```
 
-Integration tests require `gpg`, `tofu`, and `gpgconf` alongside `gpg`.
+Integration tests require `gpg`, `tofu`, and `gpgconf`, with `gpgconf` installed
+alongside `gpg`.
 `gpgconf` is a test-only cleanup tool for agents using disposable keyrings.
 Always isolate keys, GPG configuration, and state in temporary directories.
 

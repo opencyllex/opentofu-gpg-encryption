@@ -7,7 +7,7 @@ OpenTofu's built-in **AES-GCM** method to encrypt state and saved plans.
 
 Supports Linux, macOS, and Windows. Release builds target amd64 and arm64 on all
 three systems. The implementation uses Go's standard library and an installed
-GnuPG, with normal GPG keyring, agent, pinentry, and hardware-token support.
+copy of GnuPG, with normal keyring, agent, pinentry, and hardware-token support.
 
 ## Requirements and installation
 
@@ -24,8 +24,8 @@ Install GnuPG for your platform:
 - **Windows**: install [Gpg4win](https://gpg4win.org/).
 
 Download a release archive for your OS and architecture, extract the executable,
-and place it on PATH. Alternatively, on Linux, build from source with Go 1.27
-or newer:
+and place it on PATH. Alternatively, build from source with Go 1.27 or newer.
+On Linux and macOS:
 
 ```sh
 go build -trimpath -o opentofu-gpg-key-provider ./cmd/opentofu-gpg-key-provider
@@ -127,7 +127,7 @@ during `tofu init`; supply values through a variable file or `TF_VAR_*`.
 | `--recipient VALUE` | GPG configuration | Recipient selector; repeatable. Full fingerprints are recommended. |
 | `--gpg PATH` | `gpg` | GnuPG executable, resolved through PATH unless a path is supplied. |
 | `--homedir PATH` | GPG home resolution | Pass this home directory to GPG; takes precedence over `GNUPGHOME`. |
-| `--timeout DURATION` | `45s` | Request time budget for GPG operations, for example `30s`. |
+| `--timeout DURATION` | `45s` | Combined time budget for GPG operations, for example `30s`. |
 | `--help` | | Print usage and exit. |
 | `--version` | | Print the build version and exit. |
 
@@ -194,8 +194,9 @@ integrity-protected public-key decryption. Literal unencrypted packets, damaged
 ciphertext, and unsupported metadata are rejected. Raw keys travel only in
 memory and the required process pipes; they are not placed in arguments, logs,
 or temporary files by the provider. GPG's output is captured separately from
-OpenTofu's protocol stream. GPG configuration that redirects data output is
-overridden to keep it on the process pipe.
+OpenTofu's protocol stream. GPG configuration that redirects data output or
+enables text mode is overridden to keep keys on process pipes and preserve their
+binary contents.
 
 OpenTofu handles AES-GCM encryption, nonces, and authentication of state/plan
 contents. GPG protects only the data keys, so a separate external encryption
@@ -247,17 +248,17 @@ goreleaser check
 goreleaser build --snapshot --clean
 ```
 
-Integration tests require `gpg`, OpenTofu, and `gpgconf` alongside `gpg`.
-`gpgconf` is used **only by tests** to stop agents belonging to their temporary
-keyrings. Tests generate disposable keys and use temporary GPG homes and OpenTofu
-projects, leaving your normal keyring untouched. They verify the real executable
-handshake, GPG defaults, multiple recipients, wrong/missing keys, damaged
-ciphertext, timeouts, and OpenTofu state/saved-plan encryption and recipient
-rotation.
+Integration tests require `gpg`, `tofu`, and `gpgconf`, with `gpgconf` installed
+alongside `gpg`. `gpgconf` is used **only by tests** to stop agents belonging to
+their temporary keyrings. Tests generate disposable keys and use temporary GPG
+homes and OpenTofu projects, leaving your normal keyring untouched. They verify
+the real executable handshake, GPG defaults, multiple recipients, binary-key
+preservation with text mode configured, wrong/missing keys, damaged ciphertext,
+timeouts, and OpenTofu state/saved-plan encryption and recipient rotation.
 
 GitHub Actions runs these tests on Linux, macOS, and Windows. A `v*` tag runs the
 same test matrix before GoReleaser publishes archives and checksums for all six
-OS/architecture combinations. GoReleaser builds require Git history; the release
+OS/architecture combinations. Release builds use Git history; the release
 workflow checks out the full history. `goreleaser check` also needs a Git remote
 to infer the release repository. Snapshot builds work before the first commit
 or remote is configured.

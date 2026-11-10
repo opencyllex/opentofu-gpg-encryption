@@ -20,7 +20,7 @@ type Client struct {
 
 // Encrypt wraps a data key for the configured GPG recipients.
 func (c Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
-	args := []string{"--no-armor", "--compress-algo", "none", "--set-filename", ""}
+	args := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--set-filename", ""}
 	for _, recipient := range c.Recipients {
 		args = append(args, "--recipient", recipient)
 	}
@@ -32,7 +32,7 @@ func (c Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("GPG encryption failed: %w", err)
 	}
-	if !status.encrypted || !status.authenticated {
+	if !status.encrypted || !status.integrityProtected {
 		return nil, errors.New("GPG did not produce integrity-protected encrypted key material")
 	}
 	return output, nil
@@ -46,7 +46,7 @@ func (c Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) 
 		clear(output)
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
-	if !status.privateKey || !status.decrypted || !status.authenticated || status.integrityFailed {
+	if !status.privateKey || !status.decrypted || !status.integrityProtected || !status.integrityVerified || status.integrityFailed {
 		clear(output)
 		return nil, errors.New("GPG did not confirm integrity-protected public-key decryption")
 	}
@@ -89,13 +89,14 @@ func (c Client) run(ctx context.Context, input []byte, operation []string) ([]by
 }
 
 type operationStatus struct {
-	encrypted       bool
-	privateKey      bool
-	decrypted       bool
-	authenticated   bool
-	integrityFailed bool
-	noRecipients    bool
-	diagnostics     string
+	encrypted          bool
+	privateKey         bool
+	decrypted          bool
+	integrityProtected bool
+	integrityVerified  bool
+	integrityFailed    bool
+	noRecipients       bool
+	diagnostics        string
 }
 
 func readStatus(stderr string) operationStatus {
@@ -119,13 +120,16 @@ func readStatus(stderr string) operationStatus {
 		case "BEGIN_ENCRYPTION", "DECRYPTION_INFO":
 			// These records contain MDC method, cipher, and optionally AEAD
 			// algorithm. Either MDC or AEAD must protect the wrapped key.
-			status.authenticated = len(fields) >= 3 && (fields[1] != "0" || (len(fields) >= 4 && fields[3] != "0"))
+			status.integrityProtected = len(fields) >= 3 && (fields[1] != "0" || (len(fields) >= 4 && fields[3] != "0"))
 		case "END_ENCRYPTION":
 			status.encrypted = true
 		case "DECRYPTION_KEY":
 			status.privateKey = true
 		case "DECRYPTION_OKAY":
 			status.decrypted = true
+		case "GOODMDC":
+			// GPG also emits this status for successfully verified AEAD data.
+			status.integrityVerified = true
 		case "BADMDC", "DECRYPTION_FAILED":
 			status.integrityFailed = true
 		case "NO_RECP", "INV_RECP":

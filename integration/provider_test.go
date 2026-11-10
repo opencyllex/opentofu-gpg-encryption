@@ -147,6 +147,31 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("configured text mode preserves binary keys", func(t *testing.T) {
+		configure(t, master, "default-recipient "+first+"\ntextmode")
+		t.Cleanup(func() { configure(t, master, "default-recipient "+first) })
+		// Exercise a byte that text mode would change on this platform.
+		// Keys without such bytes could round-trip correctly by chance.
+		for range 512 {
+			initial := h.request(t, master, "null")
+			key := initial.Keys.EncryptionKey
+			if runtime.GOOS == "windows" {
+				newline := bytes.IndexByte(key, '\n')
+				if newline < 0 || (newline > 0 && key[newline-1] == '\r') {
+					continue
+				}
+			} else if bytes.IndexByte(key, '\r') < 0 {
+				continue
+			}
+			recovered := h.request(t, master, metadataJSON(t, initial))
+			if !bytes.Equal(recovered.Keys.DecryptionKey, key) {
+				t.Fatal("GPG's textmode setting changed the binary data key")
+			}
+			return
+		}
+		t.Fatal("could not generate a data key containing a text-sensitive byte")
+	})
+
 	t.Run("GNUPGHOME", func(t *testing.T) {
 		configure(t, master, "default-recipient "+first)
 		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
@@ -187,20 +212,29 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("GPG settings cannot bypass integrity checks or leak session keys", func(t *testing.T) {
 		configure(t, master, "default-recipient "+first)
-		ciphertext := h.gpgCommand(t, master, bytes.Repeat([]byte{42}, 32), "--rfc4880", "--recipient", first, "--encrypt")
-		ciphertext[len(ciphertext)-1] ^= 1
+		key := bytes.Repeat([]byte{42}, 32)
+		ciphertext := h.gpgCommand(t, master, key, "--rfc4880", "--recipient", first, "--encrypt")
 		var result keyResponse
 		result.Meta.ExternalData.Version = 1
 		result.Meta.ExternalData.EncryptedKey = ciphertext
 		configure(t, master, "default-recipient "+first+"\nignore-mdc-error\nshow-session-key")
-		stdout, stderr, err := h.exchange(t, master, metadataJSON(t, result))
-		if err == nil || bytes.Contains(stdout, []byte("decryption_key")) {
-			t.Fatal("GPG's ignore-mdc-error setting bypassed integrity verification")
+		t.Cleanup(func() { configure(t, master, "default-recipient "+first) })
+		if recovered := h.request(t, master, metadataJSON(t, result)); !bytes.Equal(recovered.Keys.DecryptionKey, key) {
+			t.Fatal("GPG settings prevented recovery of an intact MDC-protected key")
 		}
-		if strings.Contains(stderr, "SESSION_KEY") || strings.Contains(stderr, "session key") {
-			t.Fatalf("GPG diagnostics exposed a session key: %s", stderr)
+		ciphertext[len(ciphertext)-1] ^= 1
+		for _, options := range []string{"ignore-mdc-error", "ignore-mdc-error\nshow-session-key"} {
+			t.Run(options, func(t *testing.T) {
+				configure(t, master, "default-recipient "+first+"\n"+options)
+				stdout, stderr, err := h.exchange(t, master, metadataJSON(t, result))
+				if err == nil || bytes.Contains(stdout, []byte("encryption_key")) || bytes.Contains(stdout, []byte("decryption_key")) {
+					t.Fatal("GPG's ignore-mdc-error setting bypassed integrity verification")
+				}
+				if strings.Contains(stderr, "SESSION_KEY") || strings.Contains(stderr, "session key") {
+					t.Fatalf("GPG diagnostics exposed a session key: %s", stderr)
+				}
+			})
 		}
-		configure(t, master, "default-recipient "+first)
 	})
 
 	t.Run("reject unencrypted literal packet", func(t *testing.T) {
