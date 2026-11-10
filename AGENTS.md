@@ -1,0 +1,93 @@
+# Project
+
+This is a standalone Go executable implementing OpenTofu's version 1 external
+key-provider protocol. GnuPG protects freshly generated AES-256 data keys;
+OpenTofu's built-in `aes_gcm` method encrypts state and saved plans.
+
+Use Go 1.27 or newer. The application has no third-party Go dependencies.
+Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
+
+## Layout
+
+- `cmd/opentofu-gpg-key-provider`: thin executable entry point and build version.
+- `internal/cli`: argument parsing, request timeout, exit codes, and diagnostics.
+- `internal/provider`: protocol exchange, metadata, and data-key lifecycle.
+- `internal/gpg`: direct GnuPG subprocess invocation and machine-status checks.
+- `integration`: executable-level tests with real GPG and OpenTofu.
+- `examples`: complete HCL configurations for default and explicit recipients.
+- `.github/workflows`: three-OS tests and tag-triggered releases.
+- `.goreleaser.yaml`: six build targets, archives, and checksums.
+
+## Protocol and key lifecycle
+
+- Write the newline-terminated `OpenTofu-External-Key-Provider` version 1 header
+  before reading stdin. Runtime stdout is exclusively protocol JSON.
+- Accept `null` for an encryption-only request and stored metadata for recovery.
+  Output uses `keys`, with base64-encoded `encryption_key` and, when applicable,
+  `decryption_key`.
+- Generate a fresh 32-byte encryption key for every invocation. Recover the old
+  decryption key from input metadata independently of the new encryption key.
+- Output metadata must describe the new encryption key. The persisted format is
+  `external_data: {version: 1, encrypted_key: <base64 GPG ciphertext>}`.
+- Metadata is a compatibility boundary. Reject malformed or unsupported input;
+  a format change requires an explicit compatibility/migration decision.
+- Keep raw keys in memory and process pipes. Keep key material out of arguments,
+  diagnostic messages, and temporary files.
+
+## GnuPG behavior
+
+- Invoke `gpg` directly with separate arguments through `exec.CommandContext`.
+  Keep its output separate from the OpenTofu protocol stream.
+- Let GPG resolve its home and read `gpg.conf`. The provider does not parse that
+  configuration or invoke `gpgconf`.
+- Recipients are optional and repeatable. Explicit recipients override GPG's
+  default recipient; otherwise GPG applies `default-recipient` or
+  `default-recipient-self`. Preserve configured `encrypt-to` recipients and GPG's
+  trust model. Missing recipients fail in batch mode.
+- Use `gpg-agent` and default pinentry for private-key operations. Agent and
+  hardware-token policy belong to GnuPG. Passphrase inputs are outside the CLI's
+  scope.
+- Require successful integrity-protected public-key decryption, using GPG's
+  machine-readable status as well as its exit code. GPG can successfully unpack
+  an unencrypted literal packet, which must not be accepted as a wrapped key.
+- Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
+  diagnostic output containing session keys when `show-session-key` is enabled.
+- OpenTofu imposes a one-minute external-provider timeout in versions 1.12/1.13;
+  the executable defaults to a 45-second budget.
+
+## Testing and verification
+
+Test observable behavior at the protocol/CLI boundary. Prefer actual GPG and
+OpenTofu round trips for interoperability and crypto-related changes over tests
+of private parsing helpers.
+
+```text
+go test ./...
+go vet -tags integration ./...
+go test -tags integration -v ./...
+gofmt -l cmd internal integration
+tofu fmt -check -recursive examples
+actionlint
+goreleaser check
+goreleaser build --snapshot --clean
+```
+
+Integration tests require `gpg`, `tofu`, and `gpgconf` alongside `gpg`.
+`gpgconf` is a test-only cleanup tool for agents using disposable keyrings.
+Always isolate keys, GPG configuration, and state in temporary directories.
+
+`goreleaser check` requires a Git remote to infer the release repository.
+Snapshot builds work in a new repository without commits or a configured remote.
+To verify archives and checksums without publishing:
+
+```text
+goreleaser release --snapshot --clean --skip=publish
+```
+
+## Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+`type(scope): description`, with an optional scope. Choose an appropriate type,
+such as `feat`, `fix`, `docs`, `test`, `ci`, `build`, `refactor`, or `chore`.
+Keep the description concise and imperative. Mark breaking changes with `!`
+after the type/scope or a `BREAKING CHANGE:` footer.

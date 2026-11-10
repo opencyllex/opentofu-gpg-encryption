@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/coverage.out
+/opentofu-gpg-key-provider
+*.exe
+*.test
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
