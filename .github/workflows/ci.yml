@@ -33,16 +33,23 @@ jobs:
       - name: Install GnuPG (macOS)
         if: runner.os == 'macOS'
         run: brew install gnupg
-      - name: Install GnuPG (Windows)
+      - name: Set up GnuPG (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 5
         shell: pwsh
         run: |
-          choco install gnupg --yes --no-progress
+          $archive = Join-Path $env:RUNNER_TEMP 'gnupg-2.5.24.exe'
+          $destination = Join-Path $env:RUNNER_TEMP 'gnupg'
+          Invoke-WebRequest -Uri 'https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.5.24_20260923.exe' -OutFile $archive -TimeoutSec 60
+          $checksum = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($checksum -ne 'EA6F9DEE2CCCD83287432625B8B399173805ADD81D27067FCAF019C0C4DA1AD8') { throw 'GnuPG archive checksum mismatch' }
+          7z x $archive "-o$destination" -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $directories = @("$env:ProgramFiles\GnuPG\bin", "${env:ProgramFiles(x86)}\GnuPG\bin")
-          $installed = $directories | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'gpg.exe') }
-          if (-not $installed) { throw 'GnuPG installation directory not found' }
-          $installed | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $bin = Join-Path $destination 'bin'
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $bin 'gpg.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $bin 'gpgconf.exe') --version
       - name: Check Go formatting
         shell: bash
         run: |

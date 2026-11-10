@@ -81,6 +81,8 @@ alongside `gpg`.
 Always isolate keys, GPG configuration, and state in temporary directories.
 On macOS, create GPG test homes directly under `/tmp` to keep Unix-domain socket
 paths short.
+Windows CI extracts the native GnuPG bundle under `RUNNER_TEMP`. Keep its pinned
+URL and SHA-256 checksum in sync when updating the workflow.
 
 `goreleaser check` requires a Git remote to infer the release repository.
 Snapshot builds work in a new repository without commits or a configured remote.

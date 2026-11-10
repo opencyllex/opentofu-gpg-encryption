@@ -258,9 +258,10 @@ recipients, binary-key preservation with text mode configured, wrong/missing
 keys, damaged ciphertext, timeouts, and OpenTofu state/saved-plan encryption and
 recipient rotation.
 
-GitHub Actions runs these tests on Linux, macOS, and Windows. A `v*` tag runs the
-same test matrix before GoReleaser publishes archives and checksums for all six
-OS/architecture combinations. Release builds use Git history; the release
+GitHub Actions runs these tests on Linux, macOS, and Windows. Windows CI downloads
+and extracts a pinned native GnuPG bundle with SHA-256 verification. A `v*` tag
+runs the same test matrix before GoReleaser publishes archives and checksums for
+all six OS/architecture combinations. Release builds use Git history; the release
 workflow checks out the full history. `goreleaser check` also needs a Git remote
 to infer the release repository. Snapshot builds work before the first commit
 or remote is configured.
