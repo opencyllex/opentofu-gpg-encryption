@@ -53,11 +53,8 @@ jobs:
       - name: Check Go formatting
         shell: bash
         run: |
-          files=$(gofmt -l cmd internal integration)
-          if [ -n "$files" ]; then
-            printf '%s\n' "$files"
-            exit 1
-          fi
+          gofmt -w cmd internal integration
+          git diff --exit-code --ignore-cr-at-eol -- cmd internal integration
       - name: Check OpenTofu example formatting
         run: tofu fmt -check -recursive examples
       - name: Vet
@@ -66,7 +63,7 @@ jobs:
         run: go test -tags integration -v ./...
       - name: Check release configuration
         if: runner.os == 'Linux'
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
           args: check
