@@ -304,10 +304,21 @@ func TestIntegration(t *testing.T) {
 
 func (h harness) home(t *testing.T) string {
 	t.Helper()
-	home := filepath.Join(t.TempDir(), "keyring with spaces")
-	if err := os.Mkdir(home, 0700); err != nil {
+	parent := ""
+	if runtime.GOOS == "darwin" {
+		// macOS's default temporary path can exceed the Unix-domain socket
+		// limit once GPG appends its agent socket names.
+		parent = "/tmp"
+	}
+	home, err := os.MkdirTemp(parent, "tofu-gpg with spaces-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(home); err != nil {
+			t.Errorf("remove temporary GPG home: %v", err)
+		}
+	})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

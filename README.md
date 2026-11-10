@@ -251,10 +251,12 @@ goreleaser build --snapshot --clean
 Integration tests require `gpg`, `tofu`, and `gpgconf`, with `gpgconf` installed
 alongside `gpg`. `gpgconf` is used **only by tests** to stop agents belonging to
 their temporary keyrings. Tests generate disposable keys and use temporary GPG
-homes and OpenTofu projects, leaving your normal keyring untouched. They verify
-the real executable handshake, GPG defaults, multiple recipients, binary-key
-preservation with text mode configured, wrong/missing keys, damaged ciphertext,
-timeouts, and OpenTofu state/saved-plan encryption and recipient rotation.
+homes and OpenTofu projects, leaving your normal keyring untouched. On macOS,
+test GPG homes are created directly under `/tmp` to keep agent socket paths short.
+The tests verify the real executable handshake, GPG defaults, multiple
+recipients, binary-key preservation with text mode configured, wrong/missing
+keys, damaged ciphertext, timeouts, and OpenTofu state/saved-plan encryption and
+recipient rotation.
 
 GitHub Actions runs these tests on Linux, macOS, and Windows. A `v*` tag runs the
 same test matrix before GoReleaser publishes archives and checksums for all six

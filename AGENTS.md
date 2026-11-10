@@ -79,6 +79,8 @@ Integration tests require `gpg`, `tofu`, and `gpgconf`, with `gpgconf` installed
 alongside `gpg`.
 `gpgconf` is a test-only cleanup tool for agents using disposable keyrings.
 Always isolate keys, GPG configuration, and state in temporary directories.
+On macOS, create GPG test homes directly under `/tmp` to keep Unix-domain socket
+paths short.
 
 `goreleaser check` requires a Git remote to infer the release repository.
 Snapshot builds work in a new repository without commits or a configured remote.
