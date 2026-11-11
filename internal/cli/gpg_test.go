@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"opentofu-gpg-key-provider/internal/cli"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/cli"
 )
 
 const gpgTestStderr = "OPENTOFU_GPG_TEST_STDERR"

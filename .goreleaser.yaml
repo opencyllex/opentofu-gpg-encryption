@@ -2,6 +2,9 @@
 version: 2
 project_name: opentofu-gpg-key-provider
 
+release:
+  draft: true
+
 builds:
   - id: key-provider
     main: ./cmd/opentofu-gpg-key-provider

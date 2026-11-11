@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"opentofu-gpg-key-provider/internal/provider"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/provider"
 )
 
 type output struct {
@@ -200,8 +200,8 @@ func TestWrongKeyLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
-	if err := provider.Run(t.Context(), bytes.NewReader(input), &stdout, wrapper); err == nil {
-		t.Fatal("provider accepted a decryption key with the wrong length")
+	if err := provider.Run(t.Context(), bytes.NewReader(input), &stdout, wrapper); err == nil || !strings.Contains(err.Error(), "must be 32 bytes") {
+		t.Fatalf("wrong key length: err=%v; want a 32-byte key length error", err)
 	}
 }
 

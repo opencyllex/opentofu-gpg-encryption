@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"opentofu-gpg-key-provider/internal/gpg"
-	"opentofu-gpg-key-provider/internal/provider"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/gpg"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/provider"
 )
 
 // Run serves one OpenTofu external key provider request and returns an exit code.

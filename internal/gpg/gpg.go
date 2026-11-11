@@ -44,7 +44,6 @@ func (c Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
 func (c Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
 	output, status, err := c.run(ctx, ciphertext, []string{"--max-output", "32", "--decrypt", "--", "-"})
 	if err != nil {
-		clear(output)
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
 	if !status.privateKey || !status.decrypted || !status.integrityProtected || !status.integrityVerified || status.integrityFailed {

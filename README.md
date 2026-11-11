@@ -24,7 +24,13 @@ Install GnuPG for your platform:
 - **Windows**: install [Gpg4win](https://gpg4win.org/).
 
 Download a release archive for your OS and architecture, extract the executable,
-and place it on PATH. Alternatively, build from source with Go 1.27 or newer.
+and place it on PATH. Alternatively, install with Go 1.27 or newer:
+
+```sh
+go install github.com/opencyllex/opentofu-gpg-key-provider/cmd/opentofu-gpg-key-provider@latest
+```
+
+To build from a source checkout, use Go 1.27 or newer.
 On Linux and macOS:
 
 ```sh
@@ -260,11 +266,12 @@ recipient rotation.
 
 GitHub Actions runs these tests on Linux, macOS, and Windows. Windows CI downloads
 and extracts a pinned native GnuPG bundle with SHA-256 verification. A `v*` tag
-runs the same test matrix before GoReleaser publishes archives and checksums for
-all six OS/architecture combinations. Release builds use Git history; the release
-workflow checks out the full history. `goreleaser check` also needs a Git remote
-to infer the release repository. Snapshot builds work before the first commit
-or remote is configured.
+runs the same test matrix before GoReleaser creates a draft GitHub release with
+archives and checksums for all six OS/architecture combinations. Publish the draft
+from GitHub when it is ready. Release builds use Git history; the release workflow
+checks out the full history. `goreleaser check` also needs a Git remote to infer
+the release repository. Snapshot builds work before the first commit or remote
+is configured.
 
 ## License
 

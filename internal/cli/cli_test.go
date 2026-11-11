@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"opentofu-gpg-key-provider/internal/cli"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/cli"
 )
 
 func TestHelpAndVersion(t *testing.T) {

@@ -131,6 +131,7 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("configured extra recipients", func(t *testing.T) {
 		configure(t, publicHome, "default-recipient "+first+"\nencrypt-to "+second)
+		t.Cleanup(func() { configure(t, publicHome, "") })
 		result := h.request(t, publicHome, "null", "--recipient", first)
 		got := h.gpgCommand(t, secondHome, result.Meta.ExternalData.EncryptedKey, "--decrypt")
 		if !bytes.Equal(got, result.Keys.EncryptionKey) {
@@ -141,6 +142,7 @@ func TestIntegration(t *testing.T) {
 	t.Run("configured output cannot redirect protocol", func(t *testing.T) {
 		unexpected := filepath.ToSlash(filepath.Join(t.TempDir(), "unexpected-key-output"))
 		configure(t, master, "default-recipient "+first+"\noutput "+unexpected)
+		t.Cleanup(func() { configure(t, master, "default-recipient "+first) })
 		h.request(t, master, "null")
 		if _, err := os.Stat(unexpected); !os.IsNotExist(err) {
 			t.Fatalf("GPG wrote its configured output file: %v", err)
@@ -275,12 +277,20 @@ func TestIntegration(t *testing.T) {
 	})
 
 	t.Run("reject wrong key lengths", func(t *testing.T) {
-		for _, size := range []int{16, 33, 4096} {
+		for _, test := range []struct {
+			size       int
+			diagnostic string
+		}{
+			{16, "must be 32 bytes"},
+			{33, "--max-output"},
+			{4096, "--max-output"},
+		} {
 			var result keyResponse
 			result.Meta.ExternalData.Version = 1
-			result.Meta.ExternalData.EncryptedKey = h.gpgCommand(t, master, make([]byte, size), "--recipient", first, "--encrypt")
-			if _, _, err := h.exchange(t, master, metadataJSON(t, result), "--recipient", first); err == nil {
-				t.Fatalf("recovered a %d-byte key", size)
+			result.Meta.ExternalData.EncryptedKey = h.gpgCommand(t, master, make([]byte, test.size), "--recipient", first, "--encrypt")
+			_, stderr, err := h.exchange(t, master, metadataJSON(t, result), "--recipient", first)
+			if err == nil || !strings.Contains(stderr, test.diagnostic) {
+				t.Fatalf("%d-byte key: err=%v, stderr=%q; want %q", test.size, err, stderr, test.diagnostic)
 			}
 		}
 	})
@@ -320,10 +330,9 @@ func TestIntegration(t *testing.T) {
 			t.Fatal("rotated state could not be read with the new private key alone")
 		}
 		h.writeProject(t, project, firstHome)
-		cmd := exec.CommandContext(t.Context(), h.tofu, "output", "-raw", "secret")
-		cmd.Dir = project
-		if output, err := cmd.CombinedOutput(); err == nil {
-			t.Fatalf("old recipient could read rotated state: %s", output)
+		output, err := h.runTofu(t, project, "output", "-raw", "-no-color", "secret")
+		if err == nil || !strings.Contains(output, "GPG decryption failed") {
+			t.Fatalf("old recipient reading rotated state: err=%v\n%s", err, output)
 		}
 	})
 }
@@ -514,16 +523,22 @@ output "secret" {
 
 func (h harness) tofuCommand(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	output, err := h.runTofu(t, dir, args...)
+	if err != nil {
+		t.Fatalf("tofu %s (%s): %v\n%s", strings.Join(args, " "), runtime.GOOS, err, output)
+	}
+	return output
+}
+
+func (h harness) runTofu(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.tofu, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "TF_IN_AUTOMATION=1", "CHECKPOINT_DISABLE=1")
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("tofu %s (%s): %v\n%s", strings.Join(args, " "), runtime.GOOS, err, output)
-	}
-	return string(output)
+	return string(output), err
 }
 
 func assertEncrypted(t *testing.T, path string) {
