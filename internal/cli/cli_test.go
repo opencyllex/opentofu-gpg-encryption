@@ -2,8 +2,11 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"opentofu-gpg-key-provider/internal/cli"
 )
@@ -55,5 +58,33 @@ func TestMissingGPG(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "encryption_key") {
 		t.Fatal("failed request returned key material")
+	}
+}
+
+func TestCancellationWhileWaitingForEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stdin, input := io.Pipe()
+	defer stdin.Close()
+	defer input.Close()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, nil, stdin, &stdout, &stderr, "dev")
+	}()
+	if _, err := io.WriteString(input, "null"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 1 || !strings.Contains(stderr.String(), context.Canceled.Error()) {
+			t.Fatalf("code = %d, stderr = %q", code, &stderr)
+		}
+		if stdout.String() != "{\"magic\":\"OpenTofu-External-Key-Provider\",\"version\":1}\n" {
+			t.Fatalf("unexpected protocol output: %q", &stdout)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellation did not stop the provider while stdin remained open")
 	}
 }

@@ -21,7 +21,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	flags.Var(&recipients, "recipient", "GPG recipient fingerprint (repeatable; defaults to GPG configuration)")
 	executable := flags.String("gpg", "gpg", "GnuPG executable name or path")
 	homeDir := flags.String("homedir", "", "GnuPG home directory (defaults to GPG's normal home resolution)")
-	timeout := flags.Duration("timeout", 45*time.Second, "Combined time budget for GPG operations")
+	timeout := flags.Duration("timeout", 45*time.Second, "Time budget for metadata input and GPG operations")
 	showVersion := flags.Bool("version", false, "Print the executable version and exit")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: opentofu-gpg-key-provider [options]")

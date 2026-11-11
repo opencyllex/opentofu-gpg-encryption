@@ -127,7 +127,7 @@ during `tofu init`; supply values through a variable file or `TF_VAR_*`.
 | `--recipient VALUE` | GPG configuration | Recipient selector; repeatable. Full fingerprints are recommended. |
 | `--gpg PATH` | `gpg` | GnuPG executable, resolved through PATH unless a path is supplied. |
 | `--homedir PATH` | GPG home resolution | Pass this home directory to GPG; takes precedence over `GNUPGHOME`. |
-| `--timeout DURATION` | `45s` | Combined time budget for GPG operations, for example `30s`. |
+| `--timeout DURATION` | `45s` | Time budget for metadata input and GPG operations, for example `30s`. |
 | `--help` | | Print usage and exit. |
 | `--version` | | Print the build version and exit. |
 

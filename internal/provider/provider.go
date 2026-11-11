@@ -43,11 +43,13 @@ type response struct {
 // Run implements version 1 of OpenTofu's external key provider protocol.
 // The header is written before reading any input. Only protocol JSON is written
 // to stdout; callers are responsible for reporting returned errors on stderr.
+// On cancellation, callers must close stdin to release any pending read, or exit
+// the process.
 func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrapper) error {
 	if _, err := io.WriteString(stdout, "{\"magic\":\"OpenTofu-External-Key-Provider\",\"version\":1}\n"); err != nil {
 		return fmt.Errorf("write protocol header: %w", err)
 	}
-	input, err := io.ReadAll(io.LimitReader(stdin, maxInputSize+1))
+	input, err := readInput(ctx, stdin)
 	if err != nil {
 		return fmt.Errorf("read metadata: %w", err)
 	}
@@ -95,4 +97,22 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 		return fmt.Errorf("write key response: %w", err)
 	}
 	return nil
+}
+
+func readInput(ctx context.Context, stdin io.Reader) ([]byte, error) {
+	type result struct {
+		input []byte
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		input, err := io.ReadAll(io.LimitReader(stdin, maxInputSize+1))
+		done <- result{input: input, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-done:
+		return result.input, result.err
+	}
 }
