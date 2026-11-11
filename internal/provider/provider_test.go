@@ -130,6 +130,63 @@ func TestInvalidMetadata(t *testing.T) {
 	}
 }
 
+func TestUnsupportedMetadata(t *testing.T) {
+	wrapper := newWrapper(t)
+	initial := request(t, wrapper, "null")
+	var saved struct {
+		ExternalData struct {
+			EncryptedKey []byte `json:"encrypted_key"`
+		} `json:"external_data"`
+	}
+	if err := json.Unmarshal(initial.Meta, &saved); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := json.Marshal(saved.ExternalData.EncryptedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalData := `{"version":1,"encrypted_key":` + string(ciphertext) + `}`
+	withData := func(data string) string { return `{"external_data":` + data + `}` }
+	valid := withData(externalData)
+	byteValues := make([]int, len(saved.ExternalData.EncryptedKey))
+	for i, value := range saved.ExternalData.EncryptedKey {
+		byteValues[i] = int(value)
+	}
+	byteArray, err := json.Marshal(byteValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name  string
+		input string
+	}{
+		{"unknown outer field", `{"extra":1,"external_data":` + externalData + `}`},
+		{"unknown inner field", withData(`{"unknown":true,` + externalData[1:])},
+		{"outer field case", `{"External_Data":` + externalData + `}`},
+		{"version field case", withData(strings.Replace(externalData, `"version"`, `"VERSION"`, 1))},
+		{"encrypted key field case", withData(strings.Replace(externalData, `"encrypted_key"`, `"Encrypted_Key"`, 1))},
+		{"duplicate outer field", `{"external_data":null,"external_data":` + externalData + `}`},
+		{"escaped duplicate outer field", `{"external_data":null,"\u0065xternal_data":` + externalData + `}`},
+		{"duplicate version", withData(`{"version":0,` + externalData[1:])},
+		{"escaped duplicate version", withData(`{"\u0076ersion":0,` + externalData[1:])},
+		{"duplicate encrypted key", withData(`{"encrypted_key":null,` + externalData[1:])},
+		{"byte array ciphertext", withData(`{"version":1,"encrypted_key":` + string(byteArray) + `}`)},
+		{"trailing JSON", valid + " null"},
+		{"trailing invalid data", valid + " invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := provider.Run(t.Context(), strings.NewReader(test.input), &stdout, wrapper)
+			if err == nil || !strings.Contains(err.Error(), "parse metadata") {
+				t.Fatalf("unsupported metadata was not rejected during parsing: %v", err)
+			}
+			if strings.Count(stdout.String(), "\n") != 1 {
+				t.Fatalf("failed request emitted a key response: %s", &stdout)
+			}
+		})
+	}
+}
+
 func TestWrongKeyLength(t *testing.T) {
 	wrapper := newWrapper(t)
 	wrapped, err := wrapper.Encrypt(t.Context(), []byte("too short"))

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -27,7 +28,7 @@ func (c Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
 	args = append(args, "--encrypt", "--", "-")
 	output, status, err := c.run(ctx, plaintext, args)
 	if err != nil {
-		if status.noRecipients {
+		if status.noRecipients && len(c.Recipients) == 0 {
 			return nil, fmt.Errorf("no usable GPG recipient; supply --recipient or configure default-recipient/default-recipient-self in gpg.conf: %w", err)
 		}
 		return nil, fmt.Errorf("GPG encryption failed: %w", err)
@@ -102,7 +103,7 @@ type operationStatus struct {
 func readStatus(stderr string) operationStatus {
 	var status operationStatus
 	var diagnostics []string
-	var sessionKeyShown bool
+	var sessionKeys []string
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		message, machine := strings.CutPrefix(line, "[GNUPG:] ")
@@ -135,13 +136,21 @@ func readStatus(stderr string) operationStatus {
 		case "NO_RECP", "INV_RECP":
 			status.noRecipients = true
 		case "SESSION_KEY":
-			sessionKeyShown = true
+			if len(fields) >= 2 {
+				_, key, _ := strings.Cut(fields[1], ":")
+				if key != "" {
+					sessionKeys = append(sessionKeys, key)
+				}
+			}
 		}
 	}
 	// A user's show-session-key setting also writes the session key to GPG's
-	// human-readable log. Never forward that log, even on a failed request.
-	if !sessionKeyShown {
-		status.diagnostics = strings.Join(diagnostics, "\n")
+	// human-readable log. Filter by key value so translated logs are safe too.
+	for _, key := range sessionKeys {
+		diagnostics = slices.DeleteFunc(diagnostics, func(line string) bool {
+			return strings.Contains(line, key)
+		})
 	}
+	status.diagnostics = strings.Join(diagnostics, "\n")
 	return status
 }

@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,7 +59,15 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 		return errors.New("input metadata exceeds the 1 MiB limit")
 	}
 	var previous *metadata
-	if err := json.Unmarshal(input, &previous); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&previous); err != nil {
+		return fmt.Errorf("parse metadata: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			err = errors.New("unexpected trailing JSON data")
+		}
 		return fmt.Errorf("parse metadata: %w", err)
 	}
 
@@ -97,6 +107,60 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 		return fmt.Errorf("write key response: %w", err)
 	}
 	return nil
+}
+
+func (m *metadata) UnmarshalJSON(input []byte) error {
+	return decodeMetadataObject(input, map[string]any{
+		"external_data": &m.ExternalData,
+	})
+}
+
+func (k *encryptedKey) UnmarshalJSON(input []byte) error {
+	var ciphertext string
+	if err := decodeMetadataObject(input, map[string]any{
+		"version":       &k.Version,
+		"encrypted_key": &ciphertext,
+	}); err != nil {
+		return err
+	}
+	var err error
+	k.EncryptedKey, err = base64.StdEncoding.DecodeString(ciphertext)
+	return err
+}
+
+// Decode field names explicitly because encoding/json otherwise accepts case
+// variants and duplicate fields, even with DisallowUnknownFields enabled.
+func decodeMetadataObject(input []byte, fields map[string]any) error {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.DisallowUnknownFields()
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return errors.New("metadata must be a JSON object")
+	}
+	seen := make(map[string]bool, len(fields))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name := token.(string)
+		target, ok := fields[name]
+		if !ok {
+			return fmt.Errorf("unknown metadata field %q", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate metadata field %q", name)
+		}
+		seen[name] = true
+		if err := decoder.Decode(target); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func readInput(ctx context.Context, stdin io.Reader) ([]byte, error) {

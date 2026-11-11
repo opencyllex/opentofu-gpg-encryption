@@ -191,8 +191,31 @@ func TestIntegration(t *testing.T) {
 	t.Run("missing recipient", func(t *testing.T) {
 		home := h.home(t)
 		stdout, stderr, err := h.exchange(t, home, "null")
-		if err == nil || !strings.Contains(stderr, "recipient") || bytes.Contains(stdout, []byte("encryption_key")) {
+		if err == nil || !strings.Contains(stderr, "supply --recipient") || bytes.Contains(stdout, []byte("encryption_key")) {
 			t.Fatalf("missing recipient: err=%v, stdout=%q, stderr=%q", err, stdout, stderr)
+		}
+	})
+
+	t.Run("invalid explicit recipients", func(t *testing.T) {
+		home := h.home(t)
+		h.gpgCommand(t, home, h.gpgCommand(t, master, nil, "--export", first), "--import")
+		configure(t, home, "trust-model pgp")
+		for _, test := range []struct {
+			name      string
+			recipient string
+		}{
+			{"unknown", strings.Repeat("0", 40)},
+			{"untrusted", first},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				stdout, stderr, err := h.exchange(t, home, "null", "--recipient", test.recipient)
+				if err == nil || !strings.Contains(stderr, "GPG encryption failed") || bytes.Contains(stdout, []byte("encryption_key")) {
+					t.Fatalf("invalid recipient: err=%v, stdout=%q, stderr=%q", err, stdout, stderr)
+				}
+				if strings.Contains(stderr, "supply --recipient") || strings.Contains(stderr, "configure default-recipient") {
+					t.Fatalf("explicit recipient failure included a missing-recipient hint: %s", stderr)
+				}
+			})
 		}
 	})
 
@@ -223,7 +246,7 @@ func TestIntegration(t *testing.T) {
 			t.Fatal("GPG settings prevented recovery of an intact MDC-protected key")
 		}
 		ciphertext[len(ciphertext)-1] ^= 1
-		for _, options := range []string{"ignore-mdc-error", "ignore-mdc-error\nshow-session-key"} {
+		for _, options := range []string{"ignore-mdc-error", "show-session-key", "ignore-mdc-error\nshow-session-key"} {
 			t.Run(options, func(t *testing.T) {
 				configure(t, master, "default-recipient "+first+"\n"+options)
 				stdout, stderr, err := h.exchange(t, master, metadataJSON(t, result))
@@ -232,6 +255,9 @@ func TestIntegration(t *testing.T) {
 				}
 				if strings.Contains(stderr, "SESSION_KEY") || strings.Contains(stderr, "session key") {
 					t.Fatalf("GPG diagnostics exposed a session key: %s", stderr)
+				}
+				if options == "show-session-key" && !strings.Contains(stderr, "gpg:") {
+					t.Fatalf("show-session-key suppressed useful GPG error messages: %s", stderr)
 				}
 			})
 		}
