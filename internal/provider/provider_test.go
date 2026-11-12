@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/policy"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/provider"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/policy"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/provider"
 )
 
 type output struct {
@@ -65,10 +65,8 @@ func TestHeaderBeforeInput(t *testing.T) {
 
 func TestPolicyAlwaysComesFromCurrentConfiguration(t *testing.T) {
 	initial := request(t, "null", configuration("A"))
-	if initial.Keys.DecryptionKey != nil {
-		t.Fatal("encryption-only request included a decryption policy")
-	}
 	checkPolicy(t, initial.Keys.EncryptionKey, "A")
+	checkPolicy(t, initial.Keys.DecryptionKey, "A")
 	if bytes.Contains(initial.Meta, []byte(strings.Repeat("A", 40))) {
 		t.Fatal("authorization was persisted in metadata instead of current configuration")
 	}

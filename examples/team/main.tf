@@ -1,6 +1,15 @@
 variable "gpg_authorized_keys" {
   description = "Full GPG primary-key fingerprints authorized to read and write the state and saved plans."
   type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = length(var.gpg_authorized_keys) > 0 && alltrue([
+      for fingerprint in var.gpg_authorized_keys :
+      can(regex("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$", fingerprint))
+    ])
+    error_message = "Supply at least one full GPG primary-key fingerprint (40 or 64 hexadecimal characters)."
+  }
 }
 
 terraform {

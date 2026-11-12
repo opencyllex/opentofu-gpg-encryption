@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/method"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/policy"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/provider"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/method"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/policy"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/provider"
 )
 
 // Run serves one external encryption-method or policy-provider request.
@@ -26,7 +26,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	flags := flag.NewFlagSet("opentofu-gpg-encryption", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var authorizedKeys authorizedKeyFlags
-	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the sole local key)")
+	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the sole usable local key)")
 	executable := flags.String("gpg", "gpg", "GnuPG executable name or path")
 	homeDir := flags.String("homedir", "", "GnuPG home directory (defaults to GPG's normal home resolution)")
 	timeout := flags.Duration("timeout", 45*time.Second, "Time budget for request input and GPG operations")
@@ -35,9 +35,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "Usage: opentofu-gpg-encryption <encrypt|decrypt|policy> [options]")
 		fmt.Fprintln(stderr, "\nEncrypt signs and encrypts OpenTofu payloads; decrypt verifies every signer.")
 		fmt.Fprintln(stderr, "Policy transports public GPG settings through an optional external key provider.")
-		fmt.Fprintln(stderr, "A sole eligible signing key is selected automatically; otherwise GPG selects signers.")
-		fmt.Fprintln(stderr, "Without --authorized-key, decryption requires one unambiguous local key.")
+		fmt.Fprintln(stderr, "A sole eligible signing key is selected automatically; with several authorized keys, GPG selects signers.")
+		fmt.Fprintln(stderr, "Without --authorized-key, encryption and decryption require one unambiguous local key.")
 		fmt.Fprintln(stderr, "Every configured local-user must be authorized when an explicit list is supplied.")
+		fmt.Fprintln(stderr, "With a policy key, put GPG settings on the policy provider; only --timeout is allowed on method commands.")
 		fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
@@ -75,7 +76,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if operation == "policy" {
 		err = provider.Run(ctx, stdin, stdout, config)
 	} else {
-		err = method.Run(ctx, stdin, stdout, operation, config)
+		var configuredFlags []string
+		flags.Visit(func(option *flag.Flag) {
+			if option.Name != "timeout" {
+				configuredFlags = append(configuredFlags, "--"+option.Name)
+			}
+		})
+		err = method.Run(ctx, stdin, stdout, operation, config, configuredFlags)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "opentofu-gpg-encryption: %v\n", err)

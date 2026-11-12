@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/protocol"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/protocol"
 )
 
 const Version = 1

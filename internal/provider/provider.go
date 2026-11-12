@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/policy"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/protocol"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/policy"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/protocol"
 )
 
 type metadata struct {
@@ -21,7 +21,7 @@ type marker struct {
 
 type keys struct {
 	EncryptionKey []byte `json:"encryption_key"`
-	DecryptionKey []byte `json:"decryption_key,omitempty"`
+	DecryptionKey []byte `json:"decryption_key"`
 }
 
 type response struct {
@@ -53,11 +53,8 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, config policy.C
 	}
 	data := config.Encode()
 	result := response{
-		Keys: keys{EncryptionKey: data},
+		Keys: keys{EncryptionKey: data, DecryptionKey: data},
 		Meta: metadata{ExternalData: &marker{PolicyVersion: policy.Version}},
-	}
-	if previous != nil {
-		result.Keys.DecryptionKey = data
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return fmt.Errorf("write policy response: %w", err)

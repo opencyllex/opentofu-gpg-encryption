@@ -1,3 +1,3 @@
-module github.com/opencyllex/opentofu-gpg-key-provider
+module github.com/opencyllex/opentofu-gpg-encryption
 
 go 1.27.0

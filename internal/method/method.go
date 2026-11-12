@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/gpg"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/policy"
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/protocol"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/gpg"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/policy"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/protocol"
 )
 
 type request struct {
@@ -24,7 +25,7 @@ type response struct {
 
 // Run implements version 1 of OpenTofu's external encryption-method protocol.
 // The optional key contains public policy from the current policy provider.
-func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation string, config policy.Config) error {
+func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation string, config policy.Config, configuredFlags []string) error {
 	if _, err := io.WriteString(stdout, "{\"magic\":\"OpenTofu-External-Encryption-Method\",\"version\":1}\n"); err != nil {
 		return fmt.Errorf("write protocol header: %w", err)
 	}
@@ -32,15 +33,18 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 	if err != nil {
 		return fmt.Errorf("read method request: %w", err)
 	}
-	defer clear(input)
 	var data request
-	if err := protocol.Decode(input, &data); err != nil {
+	err = protocol.Decode(input, &data)
+	clear(input)
+	input = nil
+	if err != nil {
 		return fmt.Errorf("parse method request: %w", err)
 	}
 	if data.Payload == nil {
 		return errors.New("method request is missing payload")
 	}
 	payload, err := base64.StdEncoding.DecodeString(*data.Payload)
+	data.Payload = nil
 	if err != nil {
 		return fmt.Errorf("decode payload: %w", err)
 	}
@@ -49,7 +53,11 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 		return errors.New("payload exceeds the 256 MiB limit")
 	}
 	if data.Key != nil {
+		if len(configuredFlags) != 0 {
+			return fmt.Errorf("method flags %s cannot be used with a policy key; put GPG settings on the policy provider instead", strings.Join(configuredFlags, ", "))
+		}
 		encoded, err := base64.StdEncoding.DecodeString(*data.Key)
+		data.Key = nil
 		if err != nil {
 			return fmt.Errorf("decode policy: %w", err)
 		}

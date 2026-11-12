@@ -8,6 +8,10 @@ State is encrypted on your machine before it is stored locally or uploaded to a
 backend. This also works with S3-compatible storage that has no server-side
 encryption support.
 
+Signatures authenticate writers, but this setup does not detect rollback: someone
+with backend write access can replace the current state with an older, validly
+signed version.
+
 - [Quick start: your own key](#quick-start-your-own-key)
 - [Small team: shared state in S3](#small-team-shared-state-in-s3)
 - [Encrypting existing state](#encrypting-existing-state)
@@ -22,7 +26,7 @@ Install [OpenTofu](https://opentofu.org/docs/intro/install/) and GnuPG 2.2 or ne
 - **macOS**: `brew install gnupg`.
 - **Windows**: install [Gpg4win](https://gpg4win.org/).
 
-Download the executable from [GitHub Releases](https://github.com/opencyllex/opentofu-gpg-key-provider/releases).
+Download the executable from [GitHub Releases](https://github.com/opencyllex/opentofu-gpg-encryption/releases).
 Choose the archive for your operating system and architecture, extract it, and
 place `opentofu-gpg-encryption` (`opentofu-gpg-encryption.exe` on Windows) in a
 directory on your `PATH`. Releases support Linux, macOS, and Windows on amd64 and
@@ -51,6 +55,9 @@ With just one private key, the program selects it automatically. If you have
 several, [choose one explicitly](#choosing-a-key-when-you-have-several). Keep a
 secure backup of your private key and passphrase so you can recover your encrypted
 state if you replace or lose your computer.
+
+GPG keys normally expire. [Extend the expiry](#renewing-expiring-keys) and share
+the updated public key before it lapses so existing state remains readable.
 
 ### 3. Enable encryption in your project
 
@@ -82,7 +89,7 @@ terraform {
 OpenTofu runs the executable directly; you do not need a `required_providers`
 entry or a key-provider block for this single-user setup. GPG signs and encrypts
 the actual state and plan data. A complete example is in
-[`examples/default-key`](examples/default-key).
+[`examples/single-user`](examples/single-user).
 
 ### 4. Run OpenTofu
 
@@ -95,9 +102,9 @@ Enter your GPG passphrase when prompted. Continue using OpenTofu as usual: state
 is now stored encrypted, and saved plans created with `tofu plan -out=tfplan`
 are encrypted too.
 
-Read-only commands such as `tofu state list` decrypt and verify the state without
-signing new keys. Initialization requires no private-key operations; a normal
-state read requires one GPG decryption operation, including with hardware tokens.
+Read-only commands such as `tofu state list` only decrypt and verify; they never
+sign. Each state read needs one decryption (one confirmation on a hardware token).
+Initialization requires no private-key operations.
 
 ## Small team: shared state in S3
 
@@ -168,21 +175,22 @@ method "external" "gpg" {
 }
 ```
 
-Add another `--authorized-key` pair for each additional member, including your
-own key. Share this configuration with the team. On each computer, the program
-automatically selects that member's signing private key from the authorized list.
+List one `--authorized-key` pair per member, including yourself. Share this
+configuration with the team. On each computer, the program automatically selects
+that member's signing private key from the authorized list.
 
 The list is defined only once. The optional provider passes current public GPG
 policy to both method commands; it does no signing or decryption and requires no
 hardware-token confirmation. The `keys` argument carries this public policy,
 not an AES key. Authorization always comes from the current configuration.
 
-For new state, run `tofu init` and `tofu apply`. For existing shared state, follow
-the migration below first. Afterwards, any authorized member with backend access
-can use `tofu plan` and `tofu apply` with their own key.
+For new state, run `tofu init` and `tofu apply`. For existing unencrypted state,
+follow the migration below first. A project already using this GPG method can
+add the policy provider directly. Afterwards, any authorized member with backend
+access can use `tofu plan` and `tofu apply` with their own key.
 
-See [`examples/authorized-keys`](examples/authorized-keys) for a complete example
-that keeps the fingerprints in a `gpg_authorized_keys` variable. Supply its value
+See [`examples/team`](examples/team) for a complete example that keeps the
+fingerprints in a `gpg_authorized_keys` variable. Supply its value
 through a variable file or `TF_VAR_gpg_authorized_keys` so it is available during
 `tofu init`.
 
@@ -221,9 +229,16 @@ then follow the steps above to encrypt it in the new format. Recreate saved plan
 
 ## Adding or removing team members
 
+With S3 and other remote backends, membership changes take effect only after the
+state changes and OpenTofu uploads a rewritten copy. A no-change `tofu apply`
+does not re-encrypt remote state. For each rewrite below, wait for an apply that
+changes the state before proceeding to the next step.
+
 - **Add a member:** exchange and verify their public key on every computer, add
   their fingerprint to the shared authorized-key list, and have an existing
   member run `tofu apply`. The new member can read the state after that rewrite.
+  The new member must also import and verify every existing member's public key
+  to verify signatures on the shared state.
 - **Remove a member:** first have a remaining member run `tofu apply` while the
   old fingerprint is still authorized. Then remove that fingerprint from the
   shared configuration and have the remaining member run `tofu apply` again.
@@ -235,6 +250,29 @@ key that could read them and the public keys and authorization of their original
 signers. Removing a member does not remove their access to old copies they could
 already decrypt.
 
+## Renewing expiring keys
+
+An expired signing key prevents the program from accepting state signed by that
+key, even if a decryption private key is available. Before the key expires, its
+owner can extend the primary key and its unexpired subkeys, for example by two
+years:
+
+```sh
+gpg --quick-set-expire YOUR_FULL_FINGERPRINT 2y
+gpg --quick-set-expire YOUR_FULL_FINGERPRINT 2y "*"
+gpg --armor --output updated-public.asc --export YOUR_FULL_FINGERPRINT
+```
+
+Share `updated-public.asc` with every reader, including backup and CI machines,
+and have them run `gpg --import updated-public.asc`. The fingerprint stays the
+same, so the authorized-key list does not change. Keep the renewed private key
+backup up to date too.
+
+If a subkey has already expired, list its full fingerprint with
+`gpg --list-keys --with-subkey-fingerprint` and replace `"*"` in the second
+command with that subkey's fingerprint. Re-import the renewed public key on
+every reader to restore access to historical state.
+
 ## Advanced settings
 
 ### Choosing a key when you have several
@@ -244,9 +282,9 @@ its full primary-key fingerprint to a policy-provider command, using the same
 syntax as the team example. Both method commands then receive that selection.
 You can also pass the same authorized-key options directly to both commands.
 
-If several local private-key identities are available, decryption requires an
-explicit authorized-key list. It never signs a probe or uses the message's own
-signatures to decide which identities to trust.
+If several usable local private-key identities are available, both encryption and
+decryption require an explicit authorized-key list. The program never signs a
+probe or uses the message's own signatures to decide which identities to trust.
 
 ### GPG configuration
 
@@ -293,8 +331,10 @@ spaces stay in a single element; use forward slashes or escaped backslashes in
 Windows HCL paths. The program does not expand `~` in paths.
 
 The policy provider shares `--authorized-key`, `--gpg`, and `--homedir` settings.
-When `keys` is supplied to a method, that policy supplies these settings. Set
-`--timeout` on the method commands to change their cryptographic-operation budget.
+When `keys` is supplied to a method, put these settings on the policy-provider
+command; the method rejects them rather than silently overriding them. Only
+`--timeout` may be set on those method commands to change their
+cryptographic-operation budget.
 
 OpenTofu 1.12/1.13 imposes a one-minute timeout on external encryption commands.
 Increasing `--timeout` cannot increase OpenTofu's limit. Complete any passphrase

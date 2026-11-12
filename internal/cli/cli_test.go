@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/cli"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/cli"
 )
 
 func TestHelpAndVersion(t *testing.T) {
@@ -98,6 +98,7 @@ func TestCancellationWhileWaitingForEOF(t *testing.T) {
 }
 
 func TestInvalidMethodRequests(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	for _, input := range []string{
 		"", "{", "null", "[]", "{}", `{"payload":null}`,
 		`{"payload":[1,2,3]}`, `{"payload":"!"}`,
@@ -109,8 +110,8 @@ func TestInvalidMethodRequests(t *testing.T) {
 	} {
 		t.Run(input, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := cli.Run(t.Context(), []string{"decrypt", "--gpg", "must-not-run-gpg"}, strings.NewReader(input), &stdout, &stderr, "dev")
-			if code != 1 || strings.Contains(stderr.String(), "must-not-run-gpg") || strings.Count(stdout.String(), "\n") != 1 {
+			code := cli.Run(t.Context(), []string{"decrypt"}, strings.NewReader(input), &stdout, &stderr, "dev")
+			if code != 1 || strings.Contains(stderr.String(), "list local GPG keys:") || strings.Count(stdout.String(), "\n") != 1 {
 				t.Fatalf("invalid method request: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
 			}
 		})
@@ -136,6 +137,29 @@ func TestInvalidPolicies(t *testing.T) {
 		code := cli.Run(t.Context(), []string{"decrypt"}, bytes.NewReader(input), &stdout, &stderr, "dev")
 		if code != 1 || !strings.Contains(stderr.String(), "parse GPG policy") || strings.Count(stdout.String(), "\n") != 1 {
 			t.Fatalf("invalid policy: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
+		}
+	}
+}
+
+func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
+	policy := []byte(`{"version":1,"authorized_keys":[],"gpg":"must-not-run-gpg","homedir":""}`)
+	input, err := json.Marshal(map[string][]byte{"payload": {1}, "key": policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"encrypt", "decrypt"} {
+		for _, options := range [][]string{
+			{"--authorized-key", strings.Repeat("A", 40)},
+			{"--gpg", "gpg"},
+			{"--homedir", ""},
+		} {
+			t.Run(operation+" "+options[0], func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := cli.Run(t.Context(), append([]string{operation}, options...), bytes.NewReader(input), &stdout, &stderr, "dev")
+				if code != 1 || !strings.Contains(stderr.String(), options[0]+" cannot be used with a policy key") || strings.Count(stdout.String(), "\n") != 1 {
+					t.Fatalf("conflicting method flag: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
+				}
+			})
 		}
 	}
 }

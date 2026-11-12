@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/opencyllex/opentofu-gpg-key-provider/internal/cli"
+	"github.com/opencyllex/opentofu-gpg-encryption/internal/cli"
 )
 
 var version = "dev"

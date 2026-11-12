@@ -30,7 +30,12 @@ const (
 // The test executable also acts as a GPG forwarding wrapper. Its trace contains
 // only operation names, never arguments, payloads, passphrases, or session keys.
 func TestMain(m *testing.M) {
-	if real := os.Getenv(traceGPG); real != "" {
+	if slices.Contains(os.Args[1:], "--status-fd") {
+		real := os.Getenv(traceGPG)
+		if real == "" {
+			fmt.Fprintln(os.Stderr, "GPG test wrapper requires "+traceGPG)
+			os.Exit(1)
+		}
 		operation := "other"
 		for _, option := range []string{"--sign", "--decrypt", "--encrypt", "--list-secret-keys", "--list-keys"} {
 			if slices.Contains(os.Args[1:], option) {
@@ -38,16 +43,18 @@ func TestMain(m *testing.M) {
 				break
 			}
 		}
-		file, err := os.OpenFile(os.Getenv(traceLog), os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		_, err = fmt.Fprintln(file, operation)
-		file.Close()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if log := os.Getenv(traceLog); log != "" {
+			file, err := os.OpenFile(log, os.O_WRONLY|os.O_APPEND, 0600)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			_, err = fmt.Fprintln(file, operation)
+			file.Close()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 		cmd := exec.Command(real, os.Args[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -105,6 +112,8 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("build encryption executable: %v\n%s", err, output)
 	}
 	h := harness{binary: binary, gpg: gpg, gpgconf: gpgconf, tofu: tofu, wrapper: wrapper}
+	t.Setenv(traceGPG, h.gpg)
+	t.Setenv(traceLog, "")
 	// Even a regression in policy handling must never fall back to the user's
 	// normal keyring. Explicit --homedir options select the disposable keys.
 	t.Setenv("GNUPGHOME", h.home(t))
@@ -139,13 +148,36 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("GPG wrapper forwards without tracing", func(t *testing.T) {
+		ciphertext := h.method(t, "encrypt", firstHome, message, nil, "--gpg", h.wrapper)
+		if got := h.method(t, "decrypt", firstHome, ciphertext, nil, "--gpg", h.wrapper); !bytes.Equal(got, message) {
+			t.Fatal("GPG forwarding without a trace did not round-trip")
+		}
+	})
+
+	t.Run("GNUPGHOME resolves the single-user keyring", func(t *testing.T) {
+		t.Setenv("GNUPGHOME", firstHome)
+		stdout, stderr, err := h.exchange(t, "encrypt", methodInput(t, message, nil), "--gpg", h.gpg)
+		if err != nil {
+			t.Fatalf("encrypt with GNUPGHOME: %v\n%s", err, stderr)
+		}
+		ciphertext := decodeResponse[methodResponse](t, stdout).Payload
+		stdout, stderr, err = h.exchange(t, "decrypt", methodInput(t, ciphertext, nil), "--gpg", h.gpg)
+		if err != nil {
+			t.Fatalf("decrypt with GNUPGHOME: %v\n%s", err, stderr)
+		}
+		if got := decodeResponse[methodResponse](t, stdout).Payload; !bytes.Equal(got, message) {
+			t.Fatal("the keyring selected by GNUPGHOME did not round-trip")
+		}
+	})
+
 	t.Run("policy is current public configuration and performs no GPG operations", func(t *testing.T) {
 		log := h.startTrace(t)
 		initial := h.policy(t, firstHome, "null", append(both, "--gpg", h.wrapper)...)
 		if operations := traceOperations(t, log); len(operations) != 0 {
 			t.Fatalf("policy provider invoked GPG: %v", operations)
 		}
-		ciphertext := h.method(t, "encrypt", firstHome, message, initial.Keys.EncryptionKey)
+		ciphertext := h.method(t, "encrypt", firstHome, message, initial.Keys.EncryptionKey, "--timeout", "30s")
 		current := h.policy(t, secondHome, string(initial.Meta), both...)
 		if got := h.method(t, "decrypt", secondHome, ciphertext, current.Keys.DecryptionKey); !bytes.Equal(got, message) {
 			t.Fatal("the shared policy was not passed to the external method")
@@ -165,7 +197,6 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("sole authorized signer overrides default-key and ignores recipient defaults", func(t *testing.T) {
 		configure(t, master, "default-key "+first+"\ndefault-recipient "+first+"\ndefault-recipient-self\nencrypt-to "+first)
-		t.Cleanup(func() { configure(t, master, "") })
 		ciphertext := h.method(t, "encrypt", master, message, nil, "--authorized-key", strings.ToLower(second))
 		if got := h.method(t, "decrypt", secondHome, ciphertext, nil); !bytes.Equal(got, message) {
 			t.Fatal("the sole authorized signer was not selected")
@@ -181,46 +212,64 @@ func TestIntegration(t *testing.T) {
 				t.Fatal("GPG's selected signer was not used")
 			}
 		}
-		configure(t, master, "")
+	})
+
+	t.Run("unauthorized default-key fails with multiple eligible signers", func(t *testing.T) {
+		home := h.home(t)
+		h.gpgCommand(t, home, h.gpgCommand(t, master, nil, "--export-secret-keys", first, second), "--import")
+		unauthorized := h.generateKey(t, home, "Unauthorized Default <default@example.invalid>")
+		configure(t, home, "default-key "+unauthorized)
+		h.reject(t, "encrypt", home, message, nil, "signing key "+unauthorized+" is not authorized", both...)
 	})
 
 	t.Run("configured local-users must all be authorized", func(t *testing.T) {
 		configure(t, master, "local-user "+first)
-		t.Cleanup(func() { configure(t, master, "") })
 		h.reject(t, "encrypt", master, message, nil, "signing key "+first+" is not authorized", "--authorized-key", second)
 	})
 
 	t.Run("multiple signatures and co-signer rotation", func(t *testing.T) {
-		for _, explicit := range []bool{false, true} {
-			configure(t, master, "local-user "+first+"\nlocal-user "+second)
-			var args []string
-			if explicit {
-				args = both
-			}
-			ciphertext := h.method(t, "encrypt", master, message, nil, args...)
-			for _, home := range []string{firstHome, secondHome} {
-				if got := h.method(t, "decrypt", home, ciphertext, nil, both...); !bytes.Equal(got, message) {
-					t.Fatal("a multiply signed message could not be recovered")
-				}
-			}
-			h.reject(t, "decrypt", firstHome, ciphertext, nil, "signature from key "+second+" is not authorized")
-			h.reject(t, "decrypt", secondHome, ciphertext, nil, "signature from key "+first+" is not authorized")
-			configure(t, master, "local-user "+second)
-			plaintext := h.method(t, "decrypt", master, ciphertext, nil, both...)
-			rewritten := h.method(t, "encrypt", master, plaintext, nil, both...)
-			if got := h.method(t, "decrypt", secondHome, rewritten, nil); !bytes.Equal(got, message) {
-				t.Fatal("a retired co-signer could not be removed after rewriting")
+		configure(t, master, "local-user "+first+"\nlocal-user "+second)
+		log := h.startTrace(t)
+		ciphertext := h.method(t, "encrypt", master, message, nil, append(both, "--gpg", h.wrapper)...)
+		if operations := traceOperations(t, log); operations["list-secret-keys"] != 1 || operations["list-keys"] != 0 {
+			t.Fatalf("signer discovery required extra GPG lookups: %v", operations)
+		}
+		for _, home := range []string{firstHome, secondHome} {
+			if got := h.method(t, "decrypt", home, ciphertext, nil, both...); !bytes.Equal(got, message) {
+				t.Fatal("a multiply signed message could not be recovered")
 			}
 		}
-		configure(t, master, "")
+		h.reject(t, "decrypt", firstHome, ciphertext, nil, "signature from key "+second+" is not authorized")
+		h.reject(t, "decrypt", secondHome, ciphertext, nil, "signature from key "+first+" is not authorized")
+		configure(t, master, "local-user "+second)
+		plaintext := h.method(t, "decrypt", master, ciphertext, nil, both...)
+		rewritten := h.method(t, "encrypt", master, plaintext, nil, both...)
+		if got := h.method(t, "decrypt", secondHome, rewritten, nil); !bytes.Equal(got, message) {
+			t.Fatal("a retired co-signer could not be removed after rewriting")
+		}
 	})
 
 	t.Run("ambiguous implicit authorization fails without signing a probe", func(t *testing.T) {
 		ciphertext := h.method(t, "encrypt", firstHome, message, nil)
 		log := h.startTrace(t)
 		h.reject(t, "decrypt", master, ciphertext, nil, "multiple local GPG keys", "--gpg", h.wrapper)
-		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 {
+		h.reject(t, "encrypt", master, message, nil, "multiple local GPG keys", "--gpg", h.wrapper)
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 || operations["encrypt"] != 0 {
 			t.Fatalf("ambiguous authorization performed a private operation: %v", operations)
+		}
+	})
+
+	t.Run("duplicate keyring entries are one local identity", func(t *testing.T) {
+		home := h.home(t)
+		configure(t, home, "no-default-keyring\nkeyring first.gpg")
+		h.gpgCommand(t, home, h.gpgCommand(t, master, nil, "--export-secret-keys", first), "--import")
+		if err := os.WriteFile(filepath.Join(home, "second.gpg"), h.gpgCommand(t, master, nil, "--export", first), 0600); err != nil {
+			t.Fatal(err)
+		}
+		configure(t, home, "no-default-keyring\nkeyring first.gpg\nkeyring second.gpg")
+		ciphertext := h.method(t, "encrypt", home, message, nil)
+		if got := h.method(t, "decrypt", home, ciphertext, nil); !bytes.Equal(got, message) {
+			t.Fatal("duplicate keyring entries made single-user authorization ambiguous")
 		}
 	})
 
@@ -302,7 +351,6 @@ func TestIntegration(t *testing.T) {
 		}
 		ciphertext := h.method(t, "encrypt", firstHome, message, nil)
 		configure(t, firstHome, "skip-verify")
-		t.Cleanup(func() { configure(t, firstHome, "") })
 		h.reject(t, "decrypt", firstHome, ciphertext, nil, "valid binary signatures")
 	})
 
@@ -327,11 +375,39 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("GPG signature expiry settings do not expire state", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-3 * time.Hour)
+		h.generateKey(t, home, "Nonexpiring Signature <expiry@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
+		configure(t, home, "ask-sig-expire\ndefault-sig-expire seconds=60\nfaked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		ciphertext := h.method(t, "encrypt", home, message, nil)
+		configure(t, home, "")
+		if got := h.method(t, "decrypt", home, ciphertext, nil); !bytes.Equal(got, message) {
+			t.Fatal("the state signature inherited GPG's default expiry")
+		}
+	})
+
+	t.Run("expired keys explain renewal and recover with updated public keys", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		fingerprint := h.generateKey(t, home, "Expired Key <expired@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
+		configure(t, home, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		ciphertext := h.method(t, "encrypt", home, message, nil)
+		configure(t, home, "")
+		for _, options := range [][]string{nil, {"--authorized-key", fingerprint}} {
+			h.reject(t, "encrypt", home, message, nil, "key has expired", options...)
+			h.reject(t, "decrypt", home, ciphertext, nil, "key has expired", options...)
+		}
+		h.gpgCommand(t, home, nil, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-set-expire", fingerprint, "2y")
+		if got := h.method(t, "decrypt", home, ciphertext, nil); !bytes.Equal(got, message) {
+			t.Fatal("renewing the key did not restore access to historical state")
+		}
+	})
+
 	t.Run("integrity failures cannot leak session keys", func(t *testing.T) {
 		configure(t, master, "default-key "+first)
 		ciphertext := h.gpgCommand(t, master, tagged(message), "--rfc4880", "--recipient", first, "--sign", "--encrypt")
 		configure(t, firstHome, "ignore-mdc-error\nshow-session-key")
-		t.Cleanup(func() { configure(t, firstHome, "") })
 		if got := h.method(t, "decrypt", firstHome, ciphertext, nil); !bytes.Equal(got, message) {
 			t.Fatal("intact MDC-protected data could not be recovered")
 		}
@@ -354,7 +430,6 @@ func TestIntegration(t *testing.T) {
 			t.Skip("installed GPG does not support force-aead")
 		}
 		configure(t, firstHome, "force-aead")
-		t.Cleanup(func() { configure(t, firstHome, "") })
 		ciphertext := h.method(t, "encrypt", firstHome, message, nil)
 		status := h.decryptionStatus(t, firstHome, ciphertext)
 		var aead bool
@@ -372,6 +447,19 @@ func TestIntegration(t *testing.T) {
 		}
 		ciphertext[len(ciphertext)-1] ^= 1
 		h.reject(t, "decrypt", firstHome, ciphertext, nil, "GPG")
+	})
+
+	t.Run("reject other payload ciphers", func(t *testing.T) {
+		ciphertext := h.gpgCommand(t, firstHome, tagged(message), "--cipher-algo", "AES128", "--recipient", first, "--sign", "--encrypt")
+		h.reject(t, "decrypt", firstHome, ciphertext, nil, "did not confirm AES-256")
+	})
+
+	t.Run("decompressed plaintext is bounded by max-output", func(t *testing.T) {
+		// Keep the oversized fixture on pipes: compress a stream of zeros rather
+		// than allocating another full plaintext in the test process.
+		plaintext := io.MultiReader(strings.NewReader(payloadPurpose), io.LimitReader(zeroReader{}, 256*1024*1024+1))
+		ciphertext := h.gpgStreamCommand(t, firstHome, plaintext, "--cipher-algo", "AES256", "--compress-algo", "zlib", "--recipient", first, "--sign", "--encrypt")
+		h.reject(t, "decrypt", firstHome, ciphertext, nil, "max-output")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -455,6 +543,51 @@ func TestIntegration(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("OpenTofu adds a policy provider to existing single-user encrypted state", func(t *testing.T) {
+		project := t.TempDir()
+		h.writeProject(t, project, firstHome, false)
+		h.tofuCommand(t, project, "init", "-input=false", "-no-color")
+		h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+		h.writeProject(t, project, firstHome, true, first, second)
+		if output := h.tofuCommand(t, project, "state", "list"); !strings.Contains(output, "terraform_data.example") {
+			t.Fatal("adding a policy provider prevented reading existing state")
+		}
+		h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+		h.writeProject(t, project, secondHome, true, first, second)
+		if output := h.tofuCommand(t, project, "output", "-raw", "secret"); output != string(message) {
+			t.Fatal("the added member could not read state after the policy migration")
+		}
+	})
+
+	t.Run("team example requires a nonempty authorized-key list", func(t *testing.T) {
+		configuration, err := os.ReadFile(filepath.Join("..", "examples", "team", "main.tf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		binary, err := json.Marshal(h.binary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configuration = bytes.ReplaceAll(configuration, []byte(`"opentofu-gpg-encryption"`), binary)
+		t.Setenv("GNUPGHOME", firstHome)
+		t.Setenv("TF_VAR_gpg_authorized_keys", "[]")
+		project := t.TempDir()
+		if err := os.WriteFile(filepath.Join(project, "main.tf"), configuration, 0600); err != nil {
+			t.Fatal(err)
+		}
+		h.tofuCommand(t, project, "init", "-input=false", "-no-color")
+		output, err := h.runTofu(t, project, "plan", "-input=false", "-no-color")
+		if err == nil || !strings.Contains(output, "Supply at least one full GPG primary-key fingerprint") {
+			t.Fatalf("team example accepted empty authorization: err=%v\n%s", err, output)
+		}
+		keys, err := json.Marshal([]string{first, second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TF_VAR_gpg_authorized_keys", string(keys))
+		h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+	})
 }
 
 func executable(t *testing.T, name string) string {
@@ -497,7 +630,19 @@ func (h harness) home(t *testing.T) string {
 
 func configure(t *testing.T, home, options string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(home, "gpg.conf"), []byte("trust-model always\n"+options+"\n"), 0600); err != nil {
+	path := filepath.Join(home, "gpg.conf")
+	original, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err == nil {
+		t.Cleanup(func() {
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Errorf("restore GPG configuration: %v", err)
+			}
+		})
+	}
+	if err := os.WriteFile(path, []byte("trust-model always\n"+options+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -520,11 +665,23 @@ func (h harness) generateKey(t *testing.T, home, name string, options ...string)
 
 func (h harness) gpgCommand(t *testing.T, home string, input []byte, args ...string) []byte {
 	t.Helper()
+	return h.gpgStreamCommand(t, home, bytes.NewReader(input), args...)
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func (h harness) gpgStreamCommand(t *testing.T, home string, input io.Reader, args ...string) []byte {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	args = append([]string{"--homedir", home, "--batch", "--no-tty", "--output", "-"}, args...)
 	cmd := exec.CommandContext(ctx, h.gpg, args...)
-	cmd.Stdin = bytes.NewReader(input)
+	cmd.Stdin = input
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -549,11 +706,11 @@ func (h harness) decryptionStatus(t *testing.T, home string, ciphertext []byte) 
 	return status.Bytes()
 }
 
-func (h harness) exchange(t *testing.T, operation, home, input string, args ...string) ([]byte, string, error) {
+func (h harness) exchange(t *testing.T, operation, input string, args ...string) ([]byte, string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	args = append([]string{operation, "--gpg", h.gpg, "--homedir", home}, args...)
+	args = append([]string{operation}, args...)
 	cmd := exec.CommandContext(ctx, h.binary, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -605,7 +762,7 @@ func methodInput(t *testing.T, payload, key []byte) string {
 
 func (h harness) method(t *testing.T, operation, home string, payload, key []byte, args ...string) []byte {
 	t.Helper()
-	stdout, stderr, err := h.exchange(t, operation, home, methodInput(t, payload, key), args...)
+	stdout, stderr, err := h.exchange(t, operation, methodInput(t, payload, key), h.methodOptions(home, key, args)...)
 	if err != nil {
 		t.Fatalf("%s request: %v\n%s", operation, err, stderr)
 	}
@@ -614,16 +771,23 @@ func (h harness) method(t *testing.T, operation, home string, payload, key []byt
 
 func (h harness) reject(t *testing.T, operation, home string, payload, key []byte, diagnostic string, args ...string) string {
 	t.Helper()
-	stdout, stderr, err := h.exchange(t, operation, home, methodInput(t, payload, key), args...)
+	stdout, stderr, err := h.exchange(t, operation, methodInput(t, payload, key), h.methodOptions(home, key, args)...)
 	if err == nil || !strings.Contains(stderr, diagnostic) || strings.Count(string(stdout), "\n") != 1 {
 		t.Fatalf("expected rejected %s request containing %q: err=%v, stderr=%q", operation, diagnostic, err, stderr)
 	}
 	return stderr
 }
 
+func (h harness) methodOptions(home string, key []byte, args []string) []string {
+	if key != nil {
+		return args
+	}
+	return append([]string{"--gpg", h.gpg, "--homedir", home}, args...)
+}
+
 func (h harness) policy(t *testing.T, home, input string, args ...string) policyResponse {
 	t.Helper()
-	stdout, stderr, err := h.exchange(t, "policy", home, input, args...)
+	stdout, stderr, err := h.exchange(t, "policy", input, append([]string{"--gpg", h.gpg, "--homedir", home}, args...)...)
 	if err != nil {
 		t.Fatalf("policy request: %v\n%s", err, stderr)
 	}

@@ -19,7 +19,7 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 - `internal/protocol`: cancellable bounded reads and strict JSON decoding.
 - `internal/gpg`: direct GnuPG subprocess invocation and machine-status checks.
 - `integration`: executable-level tests with real GPG and OpenTofu.
-- `examples`: complete HCL configurations for default and explicit authorized keys.
+- `examples/single-user` and `examples/team`: complete HCL configurations.
 - `.github/workflows`: three-OS tests and tag-triggered releases.
 - `.goreleaser.yaml`: six build targets, archives, and checksums.
 
@@ -43,10 +43,13 @@ implementation, build, and release details in this file.
   Version 1 contains `version`, `authorized_keys`, `gpg`, and `homedir`. It supplies
   the current authorized fingerprints and GPG executable/home to both operations.
   With no policy input, use the command-line settings and normal GPG home.
+  Reject method configuration flags when a policy key is present; only `--timeout`
+  may be supplied on those method commands.
 - `policy` implements the version 1 `OpenTofu-External-Key-Provider` protocol,
   also writing its header before reading stdin. Accept `null` or the stored
   marker `external_data: {policy_version: 1}`. Return the current public policy
-  in `keys.encryption_key` and, when metadata is present, `keys.decryption_key`.
+  in both `keys.encryption_key` and `keys.decryption_key`, even without metadata,
+  so adding the provider to existing GPG-encrypted state preserves read access.
   Always derive policy from current trusted CLI/HCL configuration, never metadata.
   The provider must not invoke GPG, generate cryptographic keys, sign, or decrypt.
 - Policy and metadata formats are compatibility boundaries. Reject malformed,
@@ -86,7 +89,7 @@ freshness or bind data to one project.
 
 - Invoke `gpg` directly with separate arguments through `exec.CommandContext`.
   Keep its output separate from the OpenTofu protocol stream.
-- Let GPG resolve its home and read `gpg.conf`. The provider does not parse that
+- Let GPG resolve its home and read `gpg.conf`. The executable does not parse that
   configuration or invoke `gpgconf`. Override output redirection and text mode so
   binary payloads stay on process pipes and round-trip unchanged.
 - Authorized keys are optional, repeatable full primary-key fingerprints. Each
@@ -100,10 +103,11 @@ freshness or bind data to one project.
   must be authorized. Preserve `gpg.conf`, including additive `local-user` entries.
   Selecting a sole eligible key overrides `default-key`, but does not remove
   configured `local-user` signers. With no eligible key, fail the write.
-  With no explicit authorized keys, encrypt for the freshly selected signers.
-  On decryption, implicitly authorize the sole usable local private-key identity;
-  require an explicit list when more than one is present. Never sign a probe or
-  trust identities selected by the ciphertext to discover authorization.
+  With no explicit authorized keys, both operations implicitly authorize the sole
+  usable local private-key identity; require an explicit list when more than one
+  is present and fail writes before signing. Merge duplicate keyring entries by
+  primary fingerprint. Never sign a probe or trust identities selected by the
+  ciphertext to discover authorization.
   No-flags single-user mode must work without signer configuration or a provider.
   Ignore `default-recipient*` and `encrypt-to` settings; preserve GPG's trust model.
   Imported public keys must be usable under that trust model. End-user team
@@ -115,7 +119,9 @@ freshness or bind data to one project.
 - Sign actual payloads before encryption and reject every unauthorized signer.
   Encrypt signed OpenPGP packets with `--no-literal` to avoid adding a literal
   wrapper that would prevent decryption from verifying the inner signatures.
-  Override compression and text mode and require AES-256 payload encryption.
+  Override compression, text mode, and signature expiry; payload signatures must
+  not inherit `default-sig-expire`. Require AES-256 payload encryption and check
+  the cipher reported by GPG on both encryption and decryption.
 - The signed plaintext is `OpenTofu-GPG-Encryption:payload:v1`, a NUL byte, then
   the state or plan bytes. Require this tag so generic GPG signatures cannot be
   repurposed as OpenTofu payloads. Direct `gpg --decrypt` returns the full tagged
@@ -132,6 +138,8 @@ freshness or bind data to one project.
   unsigned, invalid, expired, revoked, and unrelated signatures, including an
   unauthorized co-signature alongside a valid authorized signature, even when
   GPG succeeds or signature verification is skipped in its configuration.
+- Diagnose expired keys separately from missing private keys. Renewing expiry
+  requires the key owner to update and re-share the public key with every reader.
 - Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
   diagnostic output containing session keys when `show-session-key` is enabled.
 - OpenTofu imposes a one-minute external-command timeout in versions 1.12/1.13;
@@ -183,7 +191,7 @@ URL and SHA-256 checksum in sync when updating the workflow.
 Install with Go 1.27 or newer:
 
 ```text
-go install github.com/opencyllex/opentofu-gpg-key-provider/cmd/opentofu-gpg-encryption@latest
+go install github.com/opencyllex/opentofu-gpg-encryption/cmd/opentofu-gpg-encryption@latest
 ```
 
 From a source checkout:
