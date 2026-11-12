@@ -44,7 +44,7 @@ func TestGPGFailureDiagnostics(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(gpgTestStderr, test.log+failure+"\n"+note+"\n[GNUPG:] FAILURE decrypt 1\n")
 			var stdout, stderr bytes.Buffer
-			code := cli.Run(t.Context(), []string{"--gpg", executable}, strings.NewReader(`{"external_data":{"version":1,"encrypted_key":"AQ=="}}`), &stdout, &stderr, "dev")
+			code := cli.Run(t.Context(), []string{"decrypt", "--gpg", executable, "--authorized-key", strings.Repeat("A", 40)}, strings.NewReader(`{"payload":"AQ=="}`), &stdout, &stderr, "dev")
 			if code != 1 {
 				t.Fatalf("exit code = %d, stderr = %q", code, &stderr)
 			}
@@ -58,7 +58,7 @@ func TestGPGFailureDiagnostics(t *testing.T) {
 					t.Fatalf("GPG diagnostics exposed session-key data: %s", &stderr)
 				}
 			}
-			if stdout.String() != "{\"magic\":\"OpenTofu-External-Key-Provider\",\"version\":1}\n" {
+			if stdout.String() != "{\"magic\":\"OpenTofu-External-Encryption-Method\",\"version\":1}\n" {
 				t.Fatalf("unexpected protocol output: %q", &stdout)
 			}
 		})

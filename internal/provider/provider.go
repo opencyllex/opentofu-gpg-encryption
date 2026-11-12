@@ -1,36 +1,22 @@
 package provider
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-)
 
-const (
-	keyLength       = 32
-	metadataVersion = 1
-	maxInputSize    = 1024 * 1024
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/policy"
+	"github.com/opencyllex/opentofu-gpg-key-provider/internal/protocol"
 )
-
-// KeyWrapper protects and recovers data encryption keys. Encrypt is called
-// before Decrypt so authorization can be established independently of input.
-type KeyWrapper interface {
-	Encrypt(context.Context, []byte) ([]byte, error)
-	Decrypt(context.Context, []byte) ([]byte, error)
-}
 
 type metadata struct {
-	ExternalData *encryptedKey `json:"external_data"`
+	ExternalData *marker `json:"external_data"`
 }
 
-type encryptedKey struct {
-	Version      int    `json:"version"`
-	EncryptedKey []byte `json:"encrypted_key"`
+type marker struct {
+	PolicyVersion int `json:"policy_version"`
 }
 
 type keys struct {
@@ -43,143 +29,46 @@ type response struct {
 	Meta metadata `json:"meta"`
 }
 
-// Run implements version 1 of OpenTofu's external key provider protocol.
-// The header is written before reading any input. Only protocol JSON is written
-// to stdout; callers are responsible for reporting returned errors on stderr.
-// On cancellation, callers must close stdin to release any pending read, or exit
-// the process.
-func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrapper) error {
+// Run transports current public policy through OpenTofu's key-provider protocol.
+// It performs no GPG operations and never takes authorization from metadata.
+func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, config policy.Config) error {
 	if _, err := io.WriteString(stdout, "{\"magic\":\"OpenTofu-External-Key-Provider\",\"version\":1}\n"); err != nil {
 		return fmt.Errorf("write protocol header: %w", err)
 	}
-	input, err := readInput(ctx, stdin)
+	input, err := protocol.Read(ctx, stdin, 1024*1024)
 	if err != nil {
-		return fmt.Errorf("read metadata: %w", err)
-	}
-	if len(input) > maxInputSize {
-		return errors.New("input metadata exceeds the 1 MiB limit")
+		return fmt.Errorf("read policy metadata: %w", err)
 	}
 	var previous *metadata
-	decoder := json.NewDecoder(bytes.NewReader(input))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&previous); err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
+	if err := protocol.Decode(input, &previous); err != nil {
+		return fmt.Errorf("parse policy metadata: %w", err)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		if err == nil {
-			err = errors.New("unexpected trailing JSON data")
-		}
-		return fmt.Errorf("parse metadata: %w", err)
-	}
-
 	if previous != nil {
 		if previous.ExternalData == nil {
-			return errors.New("input metadata is missing external_data")
+			return errors.New("policy metadata is missing external_data")
 		}
-		if previous.ExternalData.Version != metadataVersion {
-			return fmt.Errorf("unsupported metadata version %d", previous.ExternalData.Version)
-		}
-		if len(previous.ExternalData.EncryptedKey) == 0 {
-			return errors.New("input metadata is missing encrypted_key")
+		if previous.ExternalData.PolicyVersion != policy.Version {
+			return fmt.Errorf("unsupported policy metadata version %d", previous.ExternalData.PolicyVersion)
 		}
 	}
-
-	encryptionKey := make([]byte, keyLength)
-	defer clear(encryptionKey)
-	rand.Read(encryptionKey)
-	wrappedKey, err := wrapper.Encrypt(ctx, encryptionKey)
-	if err != nil {
-		return fmt.Errorf("protect encryption key: %w", err)
-	}
-	var decryptionKey []byte
-	if previous != nil {
-		decryptionKey, err = wrapper.Decrypt(ctx, previous.ExternalData.EncryptedKey)
-		if err != nil {
-			return fmt.Errorf("recover decryption key: %w", err)
-		}
-		defer clear(decryptionKey)
-		if len(decryptionKey) != keyLength {
-			return fmt.Errorf("decrypted key must be %d bytes, got %d", keyLength, len(decryptionKey))
-		}
-	}
+	data := config.Encode()
 	result := response{
-		Keys: keys{EncryptionKey: encryptionKey, DecryptionKey: decryptionKey},
-		Meta: metadata{ExternalData: &encryptedKey{Version: metadataVersion, EncryptedKey: wrappedKey}},
+		Keys: keys{EncryptionKey: data},
+		Meta: metadata{ExternalData: &marker{PolicyVersion: policy.Version}},
+	}
+	if previous != nil {
+		result.Keys.DecryptionKey = data
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
-		return fmt.Errorf("write key response: %w", err)
+		return fmt.Errorf("write policy response: %w", err)
 	}
 	return nil
 }
 
 func (m *metadata) UnmarshalJSON(input []byte) error {
-	return decodeMetadataObject(input, map[string]any{
-		"external_data": &m.ExternalData,
-	})
+	return protocol.Object(input, map[string]any{"external_data": &m.ExternalData})
 }
 
-func (k *encryptedKey) UnmarshalJSON(input []byte) error {
-	var ciphertext string
-	if err := decodeMetadataObject(input, map[string]any{
-		"version":       &k.Version,
-		"encrypted_key": &ciphertext,
-	}); err != nil {
-		return err
-	}
-	var err error
-	k.EncryptedKey, err = base64.StdEncoding.DecodeString(ciphertext)
-	return err
-}
-
-// Decode field names explicitly because encoding/json otherwise accepts case
-// variants and duplicate fields, even with DisallowUnknownFields enabled.
-func decodeMetadataObject(input []byte, fields map[string]any) error {
-	decoder := json.NewDecoder(bytes.NewReader(input))
-	decoder.DisallowUnknownFields()
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	if token != json.Delim('{') {
-		return errors.New("metadata must be a JSON object")
-	}
-	seen := make(map[string]bool, len(fields))
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		name := token.(string)
-		target, ok := fields[name]
-		if !ok {
-			return fmt.Errorf("unknown metadata field %q", name)
-		}
-		if seen[name] {
-			return fmt.Errorf("duplicate metadata field %q", name)
-		}
-		seen[name] = true
-		if err := decoder.Decode(target); err != nil {
-			return err
-		}
-	}
-	_, err = decoder.Token()
-	return err
-}
-
-func readInput(ctx context.Context, stdin io.Reader) ([]byte, error) {
-	type result struct {
-		input []byte
-		err   error
-	}
-	done := make(chan result, 1)
-	go func() {
-		input, err := io.ReadAll(io.LimitReader(stdin, maxInputSize+1))
-		done <- result{input: input, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case result := <-done:
-		return result.input, result.err
-	}
+func (m *marker) UnmarshalJSON(input []byte) error {
+	return protocol.Object(input, map[string]any{"policy_version": &m.PolicyVersion})
 }

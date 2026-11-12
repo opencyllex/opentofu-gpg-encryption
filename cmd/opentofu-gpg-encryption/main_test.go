@@ -16,14 +16,14 @@ import (
 )
 
 func TestCancellationWhileWaitingForStdin(t *testing.T) {
-	name := "opentofu-gpg-key-provider"
+	name := "opentofu-gpg-encryption"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	binary := filepath.Join(t.TempDir(), name)
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build provider: %v\n%s", err, output)
+		t.Fatalf("build encryption executable: %v\n%s", err, output)
 	}
 	for _, test := range []struct {
 		name       string
@@ -31,8 +31,8 @@ func TestCancellationWhileWaitingForStdin(t *testing.T) {
 		interrupt  bool
 		diagnostic string
 	}{
-		{name: "timeout", args: []string{"--timeout", "100ms"}, diagnostic: context.DeadlineExceeded.Error()},
-		{name: "interrupt", interrupt: true, diagnostic: context.Canceled.Error()},
+		{name: "timeout", args: []string{"encrypt", "--timeout", "100ms"}, diagnostic: context.DeadlineExceeded.Error()},
+		{name: "interrupt", args: []string{"encrypt"}, interrupt: true, diagnostic: context.Canceled.Error()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.interrupt && runtime.GOOS == "windows" {
@@ -63,7 +63,7 @@ func TestCancellationWhileWaitingForStdin(t *testing.T) {
 			}()
 			reader := bufio.NewReader(stdout)
 			header, err := reader.ReadString('\n')
-			if err != nil || header != "{\"magic\":\"OpenTofu-External-Key-Provider\",\"version\":1}\n" {
+			if err != nil || header != "{\"magic\":\"OpenTofu-External-Encryption-Method\",\"version\":1}\n" {
 				t.Fatalf("protocol header = %q, error = %v", header, err)
 			}
 			if test.interrupt {
@@ -74,7 +74,7 @@ func TestCancellationWhileWaitingForStdin(t *testing.T) {
 			body, readErr := io.ReadAll(reader)
 			err = cmd.Wait()
 			if ctx.Err() != nil {
-				t.Fatal("provider did not exit while stdin remained open")
+				t.Fatal("command did not exit while stdin remained open")
 			}
 			if readErr != nil {
 				t.Fatal(readErr)

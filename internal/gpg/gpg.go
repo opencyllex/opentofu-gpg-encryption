@@ -12,18 +12,18 @@ import (
 	"time"
 )
 
-// Bind signatures to this protocol rather than arbitrary 32-byte files signed
-// by the same GPG key for other purposes.
-const keyPurpose = "OpenTofu-GPG-Key-Provider:data-key:v1\x00"
+// Bind signatures to OpenTofu payloads rather than other documents signed by
+// the same GPG keys. The limit also bounds decompression of untrusted messages.
+const (
+	payloadPurpose = "OpenTofu-GPG-Encryption:payload:v1\x00"
+	MaxPayloadSize = 256 * 1024 * 1024
+)
 
 // Client invokes GnuPG with its normal configuration, keyring, and agent.
-// Encrypt establishes authorized keys before Decrypt authenticates input.
 type Client struct {
 	Executable     string
 	HomeDir        string
 	AuthorizedKeys []string
-
-	authorizedKeys []string
 }
 
 // Encrypt automatically selects the sole eligible signer, or uses GPG's signer
@@ -38,7 +38,7 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 		signArgs = append(signArgs, "--local-user", selected)
 	}
 	signArgs = append(signArgs, "--sign", "--", "-")
-	message := append([]byte(keyPurpose), plaintext...)
+	message := append([]byte(payloadPurpose), plaintext...)
 	defer clear(message)
 	signed, status, err := c.run(ctx, message, signArgs)
 	if err != nil {
@@ -68,7 +68,7 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 
 	// The input is already a signed OpenPGP packet stream. Do not put it in
 	// another literal packet: decryption must also verify the inner signature.
-	args := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--no-literal", "--no-default-recipient", "--no-encrypt-to", "--no-groups"}
+	args := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--cipher-algo", "AES256", "--no-literal", "--no-default-recipient", "--no-encrypt-to", "--no-groups"}
 	for _, fingerprint := range authorized {
 		args = append(args, "--recipient", fingerprint)
 	}
@@ -78,48 +78,22 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 		return nil, fmt.Errorf("GPG encryption failed: %w", err)
 	}
 	if !status.encrypted || !status.integrityProtected {
-		return nil, errors.New("GPG did not produce integrity-protected encrypted key material")
+		return nil, errors.New("GPG did not produce integrity-protected encrypted data")
 	}
-	c.authorizedKeys = authorized
 	return output, nil
 }
 
 func (c *Client) selectSigner(ctx context.Context) (string, error) {
-	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--with-secret", "--list-secret-keys"})
+	keys, err := c.localKeys(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list GPG signing keys: %w", err)
+		return "", err
 	}
 	var candidates []string
-	var primary string
-	var usable, signingSecret bool
-	collect := func() {
-		if usable && signingSecret && (len(c.AuthorizedKeys) == 0 || slices.Contains(c.AuthorizedKeys, primary)) {
-			candidates = append(candidates, primary)
+	for _, key := range keys {
+		if key.canSign && (len(c.AuthorizedKeys) == 0 || slices.Contains(c.AuthorizedKeys, key.fingerprint)) {
+			candidates = append(candidates, key.fingerprint)
 		}
 	}
-	for line := range strings.SplitSeq(string(listing), "\n") {
-		fields := strings.Split(line, ":")
-		switch fields[0] {
-		case "sec":
-			collect()
-			primary, usable, signingSecret = "", false, false
-			if len(fields) >= 15 {
-				// Uppercase S describes usable signing capability across the
-				// whole key; lowercase s describes this particular key packet.
-				usable = strings.Contains(fields[11], "S") && !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ired")
-				signingSecret = strings.Contains(fields[11], "s") && fields[14] != "" && fields[14] != "#"
-			}
-		case "ssb":
-			if len(fields) >= 15 && !strings.ContainsAny(fields[1], "ired") && strings.Contains(fields[11], "s") && fields[14] != "" && fields[14] != "#" {
-				signingSecret = true
-			}
-		case "fpr":
-			if primary == "" && len(fields) >= 10 {
-				primary = fields[9]
-			}
-		}
-	}
-	collect()
 	switch len(candidates) {
 	case 0:
 		if len(c.AuthorizedKeys) != 0 {
@@ -133,10 +107,73 @@ func (c *Client) selectSigner(ctx context.Context) (string, error) {
 	}
 }
 
+type localKey struct {
+	fingerprint string
+	canSign     bool
+}
+
+func (c *Client) localKeys(ctx context.Context) ([]localKey, error) {
+	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--with-secret", "--list-secret-keys"})
+	if err != nil {
+		return nil, fmt.Errorf("list local GPG keys: %w", err)
+	}
+	var keys []localKey
+	var primary string
+	var usable, signingCap, secret, signingSecret bool
+	collect := func() {
+		if usable && secret {
+			keys = append(keys, localKey{fingerprint: primary, canSign: signingCap && signingSecret})
+		}
+	}
+	for line := range strings.SplitSeq(string(listing), "\n") {
+		fields := strings.Split(line, ":")
+		switch fields[0] {
+		case "sec":
+			collect()
+			primary, usable, signingCap, secret, signingSecret = "", false, false, false, false
+			if len(fields) >= 15 {
+				// Uppercase S describes usable signing capability across the
+				// whole key; lowercase s describes this particular key packet.
+				usable = !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ired")
+				signingCap = strings.Contains(fields[11], "S")
+				secret = fields[14] != "" && fields[14] != "#"
+				signingSecret = strings.Contains(fields[11], "s") && secret
+			}
+		case "ssb":
+			if len(fields) >= 15 && fields[14] != "" && fields[14] != "#" {
+				secret = true
+				if !strings.ContainsAny(fields[1], "ired") && strings.Contains(fields[11], "s") {
+					signingSecret = true
+				}
+			}
+		case "fpr":
+			if primary == "" && len(fields) >= 10 {
+				primary = fields[9]
+			}
+		}
+	}
+	collect()
+	return keys, nil
+}
+
 // Decrypt requires integrity-protected public-key encryption and valid binary
 // signatures exclusively from authorized primary keys or their signing subkeys.
 func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
-	output, status, err := c.run(ctx, ciphertext, []string{"--max-output", strconv.Itoa(len(keyPurpose) + 32), "--decrypt", "--", "-"})
+	authorized := c.AuthorizedKeys
+	if len(authorized) == 0 {
+		keys, err := c.localKeys(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(keys) == 0 {
+			return nil, errors.New("no local GPG private key is available; specify the authorized signing fingerprints with --authorized-key")
+		}
+		if len(keys) != 1 {
+			return nil, errors.New("multiple local GPG keys are available; use --authorized-key or a policy provider to specify authorized signers")
+		}
+		authorized = []string{keys[0].fingerprint}
+	}
+	output, status, err := c.run(ctx, ciphertext, []string{"--max-output", strconv.Itoa(len(payloadPurpose) + MaxPayloadSize), "--decrypt", "--", "-"})
 	if err != nil {
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
@@ -149,17 +186,17 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		return nil, errors.New("GPG did not confirm valid binary signatures from authorized keys")
 	}
 	for _, signer := range status.validSigners {
-		if !slices.Contains(c.authorizedKeys, signer) {
+		if !slices.Contains(authorized, signer) {
 			clear(output)
 			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signer)
 		}
 	}
-	key, ok := bytes.CutPrefix(output, []byte(keyPurpose))
+	payload, ok := bytes.CutPrefix(output, []byte(payloadPurpose))
 	if !ok {
 		clear(output)
-		return nil, errors.New("GPG-signed message is not tagged as an OpenTofu data key")
+		return nil, errors.New("GPG-signed message is not tagged as an OpenTofu payload")
 	}
-	return key, nil
+	return payload, nil
 }
 
 func (c *Client) primaryFingerprint(ctx context.Context, fingerprint string) (string, error) {
@@ -253,7 +290,7 @@ func readStatus(stderr string) operationStatus {
 		switch fields[0] {
 		case "BEGIN_ENCRYPTION", "DECRYPTION_INFO":
 			// These records contain MDC method, cipher, and optionally AEAD
-			// algorithm. Either MDC or AEAD must protect the wrapped key.
+			// algorithm. Either MDC or AEAD must protect the payload.
 			status.integrityProtected = len(fields) >= 3 && (fields[1] != "0" || (len(fields) >= 4 && fields[3] != "0"))
 		case "END_ENCRYPTION":
 			status.encrypted = true

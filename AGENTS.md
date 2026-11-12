@@ -1,18 +1,22 @@
 # Project
 
 This is a standalone Go executable implementing OpenTofu's version 1 external
-key-provider protocol. GnuPG protects freshly generated AES-256 data keys;
-OpenTofu's built-in `aes_gcm` method encrypts state and saved plans.
+encryption-method protocol. GnuPG signs and encrypts complete state and saved-plan
+payloads with AES-256 session keys. An optional external key provider transports
+public authorization and GPG configuration; it performs no cryptographic work.
 
 Use Go 1.27 or newer. The application has no third-party Go dependencies.
 Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 
 ## Layout
 
-- `cmd/opentofu-gpg-key-provider`: thin executable entry point and build version.
+- `cmd/opentofu-gpg-encryption`: thin executable entry point and build version.
 - `internal/cli`: argument parsing, GPG operation timeout, exit codes, and
   diagnostics.
-- `internal/provider`: protocol exchange, metadata, and data-key lifecycle.
+- `internal/method`: encryption-method protocol exchange and optional policy input.
+- `internal/provider`: policy-only key-provider protocol and metadata marker.
+- `internal/policy`: versioned public policy and full-fingerprint validation.
+- `internal/protocol`: cancellable bounded reads and strict JSON decoding.
 - `internal/gpg`: direct GnuPG subprocess invocation and machine-status checks.
 - `integration`: executable-level tests with real GPG and OpenTofu.
 - `examples`: complete HCL configurations for default and explicit authorized keys.
@@ -28,35 +32,52 @@ plaintext-state migration instructions. Treat `gpg.conf` as advanced settings;
 the quick start must work without editing it. Keep protocol, cryptographic
 implementation, build, and release details in this file.
 
-## Protocol and key lifecycle
+## Protocols and payload lifecycle
 
-- Write the newline-terminated `OpenTofu-External-Key-Provider` version 1 header
-  before reading stdin. Runtime stdout is exclusively protocol JSON.
-- Accept `null` for an encryption-only request and stored metadata for recovery.
-  Output uses `keys`, with base64-encoded `encryption_key` and, when applicable,
-  `decryption_key`.
-- Generate a fresh 32-byte encryption key for every invocation. Recover the old
-  decryption key from input metadata independently of the new encryption key.
-- Output metadata must describe the new encryption key. The persisted format is
-  `external_data: {version: 1, encrypted_key: <base64 GPG ciphertext>}`.
-- Metadata is a compatibility boundary. Reject malformed or unsupported input;
-  a format change requires an explicit compatibility/migration decision. Input
-  metadata is limited to 1 MiB; recovered data keys must be exactly 32 bytes.
-- Keep raw keys in memory and process pipes. Keep key material out of arguments,
-  diagnostic messages, and temporary files.
-- Keep key-provider names stable in stored configurations. Renames require
+- `encrypt` and `decrypt` implement the external encryption-method protocol.
+  Write the newline-terminated `OpenTofu-External-Encryption-Method` version 1
+  header before reading stdin. Input contains a base64 `payload` and an optional
+  base64 `key`; output contains a base64 `payload`. Runtime stdout is exclusively
+  protocol JSON.
+- The optional method `key` is a versioned public policy, not AES key material.
+  Version 1 contains `version`, `authorized_keys`, `gpg`, and `homedir`. It supplies
+  the current authorized fingerprints and GPG executable/home to both operations.
+  With no policy input, use the command-line settings and normal GPG home.
+- `policy` implements the version 1 `OpenTofu-External-Key-Provider` protocol,
+  also writing its header before reading stdin. Accept `null` or the stored
+  marker `external_data: {policy_version: 1}`. Return the current public policy
+  in `keys.encryption_key` and, when metadata is present, `keys.decryption_key`.
+  Always derive policy from current trusted CLI/HCL configuration, never metadata.
+  The provider must not invoke GPG, generate cryptographic keys, sign, or decrypt.
+- Policy and metadata formats are compatibility boundaries. Reject malformed,
+  duplicate, case-variant, unknown, or unsupported fields; format changes require
+  an explicit compatibility/migration decision. Policy and provider input are
+  limited to 1 MiB. Method JSON input is limited to 512 MiB and plaintext payloads
+  to 256 MiB; bound GPG's decrypted output to the purpose tag plus that limit.
+- GPG generates a fresh session key for each actual encryption. There is no
+  encryption-key preparation during method initialization. A state read performs
+  no signing, including implicit single-user authorization discovery. Hardware
+  confirmations occur only for actual payload operations, not policy requests.
+- Keep plaintext and key material in memory and process pipes, out of arguments,
+  diagnostics, and temporary files. Public policy bytes are not secrets.
+- The earlier development key-provider/AES-GCM format and executable name are
+  intentionally unsupported by the new method. Migration uses the old executable
+  and configuration to write plaintext, then OpenTofu's unencrypted fallback to
+  rewrite it with the external GPG method. Recreate saved plans.
+- Keep policy-provider names stable in stored configurations. Renames require
   OpenTofu's `encrypted_metadata_alias` or an explicit migration.
 
 ## Security model
 
-OpenTofu handles AES-GCM encryption, nonces, and authentication of state and plan
-contents. GPG authenticates and protects the data keys; a separate external
-encryption method is unnecessary.
+The external method signs a purpose-tagged payload and encrypts the signed
+OpenPGP packet stream with GPG. OpenTofu stores that ciphertext in its usual
+encrypted envelope. The method requires GPG's integrity and signature status in
+addition to a successful exit code before returning any plaintext.
 
 Encryption to a public key alone does not authenticate the writer: anyone with
-that public key can wrap a data key they chose. Requiring an authorized signature
-prevents a backend or saved-plan writer with only public keys from substituting
-their own data key and forging AES-GCM-encrypted content. OpenTofu's
+that public key can encrypt content they chose. Requiring authorized signatures
+prevents a backend or saved-plan writer with only public keys from forging
+accepted state or plan content. OpenTofu's
 `enforced = true` requires encryption but does not establish the signer's identity.
 Valid historical ciphertext can still be replayed; this scheme does not establish
 freshness or bind data to one project.
@@ -67,9 +88,9 @@ freshness or bind data to one project.
   Keep its output separate from the OpenTofu protocol stream.
 - Let GPG resolve its home and read `gpg.conf`. The provider does not parse that
   configuration or invoke `gpgconf`. Override output redirection and text mode so
-  binary data keys stay on process pipes and round-trip unchanged.
+  binary payloads stay on process pipes and round-trip unchanged.
 - Authorized keys are optional, repeatable full primary-key fingerprints. Each
-  key can decrypt data keys and authenticate signatures on recovered data keys.
+  key can decrypt payloads and authenticate signatures on recovered payloads.
   Accept only 40 or 64 hexadecimal characters, without spaces, a `0x` prefix, or
   a `!` suffix. Reject names, email addresses, and short or long key IDs.
   Automatically select the sole authorized key with a usable signing secret key,
@@ -78,41 +99,42 @@ freshness or bind data to one project.
   Multiple `local-user` entries may produce multiple signatures; every signer
   must be authorized. Preserve `gpg.conf`, including additive `local-user` entries.
   Selecting a sole eligible key overrides `default-key`, but does not remove
-  configured `local-user` signers. With no eligible key, fail without returning
-  encryption keys.
-  Without explicit authorized keys, implicitly authorize every freshly selected
-  signer; no-flags single-user mode must work without signer configuration.
+  configured `local-user` signers. With no eligible key, fail the write.
+  With no explicit authorized keys, encrypt for the freshly selected signers.
+  On decryption, implicitly authorize the sole usable local private-key identity;
+  require an explicit list when more than one is present. Never sign a probe or
+  trust identities selected by the ciphertext to discover authorization.
+  No-flags single-user mode must work without signer configuration or a provider.
   Ignore `default-recipient*` and `encrypt-to` settings; preserve GPG's trust model.
   Imported public keys must be usable under that trust model. End-user team
   instructions use verified fingerprints and `gpg --quick-lsign-key` to establish
   local key validity without changing GPG configuration.
-  Every selected signing secret key is required on every invocation, including
-  read-only OpenTofu commands. Recovery also requires a corresponding decryption
-  private key and every original signer's public key and authorization.
-- Sign each new data key before encryption. Resolve implicit authorization from
-  the signature on the freshly generated key, independently of stored metadata,
-  before recovering the previous key. Reject writes by unauthorized signers.
-- The signed plaintext is `OpenTofu-GPG-Key-Provider:data-key:v1`, a NUL byte,
-  then the 32-byte data key. Require this purpose tag on recovery so generic GPG
-  signatures cannot be repurposed as data-key authorizations. Direct
-  `gpg --decrypt` returns the complete tagged message, not just the raw key.
+  Every selected signing secret key is required for writes. Reading requires a
+  corresponding decryption private key and every original signer's public key
+  and authorization, but does not require a signing private key.
+- Sign actual payloads before encryption and reject every unauthorized signer.
+  Encrypt signed OpenPGP packets with `--no-literal` to avoid adding a literal
+  wrapper that would prevent decryption from verifying the inner signatures.
+  Override compression and text mode and require AES-256 payload encryption.
+- The signed plaintext is `OpenTofu-GPG-Encryption:payload:v1`, a NUL byte, then
+  the state or plan bytes. Require this tag so generic GPG signatures cannot be
+  repurposed as OpenTofu payloads. Direct `gpg --decrypt` returns the full tagged
+  message. Unsigned or untagged messages are unsupported.
 - Use `gpg-agent` and default pinentry for private-key operations. Agent and
   hardware-token policy belong to GnuPG. Passphrase inputs are outside the CLI's
   scope.
 - Require successful integrity-protected public-key decryption, using GPG's
   machine-readable status as well as its exit code. Require positive integrity
   verification for both MDC and AEAD. GPG can successfully unpack an unencrypted
-  literal packet, which must not be accepted as a wrapped key.
+  literal packet, which must not be accepted as encrypted data.
 - Require at least one binary signature; every signature must be valid and every
   signer an authorized primary fingerprint (or its signing subkey). Reject
   unsigned, invalid, expired, revoked, and unrelated signatures, including an
   unauthorized co-signature alongside a valid authorized signature, even when
   GPG succeeds or signature verification is skipped in its configuration.
-  Unsigned or untagged wrapped keys from earlier development versions are
-  intentionally unsupported.
 - Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
   diagnostic output containing session keys when `show-session-key` is enabled.
-- OpenTofu imposes a one-minute external-provider timeout in versions 1.12/1.13;
+- OpenTofu imposes a one-minute external-command timeout in versions 1.12/1.13;
   the executable defaults to a 45-second budget.
 
 ## Key rotation and historical data
@@ -161,13 +183,13 @@ URL and SHA-256 checksum in sync when updating the workflow.
 Install with Go 1.27 or newer:
 
 ```text
-go install github.com/opencyllex/opentofu-gpg-key-provider/cmd/opentofu-gpg-key-provider@latest
+go install github.com/opencyllex/opentofu-gpg-key-provider/cmd/opentofu-gpg-encryption@latest
 ```
 
 From a source checkout:
 
 ```text
-go build -trimpath ./cmd/opentofu-gpg-key-provider
+go build -trimpath ./cmd/opentofu-gpg-encryption
 ```
 
 Go adds the `.exe` suffix on Windows.

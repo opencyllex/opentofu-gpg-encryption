@@ -1,25 +1,22 @@
 terraform {
   encryption {
-    key_provider "external" "gpg" {
-      command = ["opentofu-gpg-key-provider"]
-    }
-
-    method "aes_gcm" "gpg" {
-      keys = key_provider.external.gpg
+    method "external" "gpg" {
+      encrypt_command = ["opentofu-gpg-encryption", "encrypt"]
+      decrypt_command = ["opentofu-gpg-encryption", "decrypt"]
     }
 
     state {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
 
     plan {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
   }
 }
 
 resource "terraform_data" "example" {
-  input = "An example value protected using GPG's default signing key."
+  input = "An example value signed and encrypted using the sole local GPG key."
 }

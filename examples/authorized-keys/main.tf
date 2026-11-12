@@ -5,24 +5,26 @@ variable "gpg_authorized_keys" {
 
 terraform {
   encryption {
-    key_provider "external" "gpg" {
+    key_provider "external" "gpg_policy" {
       command = concat(
-        ["opentofu-gpg-key-provider"],
+        ["opentofu-gpg-encryption", "policy"],
         flatten([for fingerprint in var.gpg_authorized_keys : ["--authorized-key", fingerprint]])
       )
     }
 
-    method "aes_gcm" "gpg" {
-      keys = key_provider.external.gpg
+    method "external" "gpg" {
+      keys            = key_provider.external.gpg_policy
+      encrypt_command = ["opentofu-gpg-encryption", "encrypt"]
+      decrypt_command = ["opentofu-gpg-encryption", "decrypt"]
     }
 
     state {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
 
     plan {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
   }

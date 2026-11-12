@@ -1,4 +1,4 @@
-# OpenTofu GPG Key Provider
+# OpenTofu GPG Encryption
 
 Encrypt your OpenTofu state and saved plans with your own GPG keys. Use one key
 for a personal project, or let each member of a small team use their own key to
@@ -22,9 +22,9 @@ Install [OpenTofu](https://opentofu.org/docs/intro/install/) and GnuPG 2.2 or ne
 - **macOS**: `brew install gnupg`.
 - **Windows**: install [Gpg4win](https://gpg4win.org/).
 
-Download the provider from [GitHub Releases](https://github.com/opencyllex/opentofu-gpg-key-provider/releases).
+Download the executable from [GitHub Releases](https://github.com/opencyllex/opentofu-gpg-key-provider/releases).
 Choose the archive for your operating system and architecture, extract it, and
-place `opentofu-gpg-key-provider` (`opentofu-gpg-key-provider.exe` on Windows) in a
+place `opentofu-gpg-encryption` (`opentofu-gpg-encryption.exe` on Windows) in a
 directory on your `PATH`. Releases support Linux, macOS, and Windows on amd64 and
 arm64.
 
@@ -32,7 +32,7 @@ Check that both tools are available in the terminal where you run OpenTofu:
 
 ```sh
 gpg --version
-opentofu-gpg-key-provider --version
+opentofu-gpg-encryption --version
 ```
 
 ### 2. Create your GPG key
@@ -45,9 +45,9 @@ gpg --generate-key
 ```
 
 Follow the prompts for your name, email address, and passphrase. GPG creates a
-key suitable for this provider using its default settings.
+key suitable for this program using its default settings.
 
-With just one private key, the provider selects it automatically. If you have
+With just one private key, the program selects it automatically. If you have
 several, [choose one explicitly](#choosing-a-key-when-you-have-several). Keep a
 secure backup of your private key and passphrase so you can recover your encrypted
 state if you replace or lose your computer.
@@ -61,21 +61,18 @@ project already has a state file, use the same configuration together with the
 ```hcl
 terraform {
   encryption {
-    key_provider "external" "gpg" {
-      command = ["opentofu-gpg-key-provider"]
-    }
-
-    method "aes_gcm" "gpg" {
-      keys = key_provider.external.gpg
+    method "external" "gpg" {
+      encrypt_command = ["opentofu-gpg-encryption", "encrypt"]
+      decrypt_command = ["opentofu-gpg-encryption", "decrypt"]
     }
 
     state {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
 
     plan {
-      method   = method.aes_gcm.gpg
+      method   = method.external.gpg
       enforced = true
     }
   }
@@ -83,7 +80,9 @@ terraform {
 ```
 
 OpenTofu runs the executable directly; you do not need a `required_providers`
-entry for it. A complete example is in [`examples/default-key`](examples/default-key).
+entry or a key-provider block for this single-user setup. GPG signs and encrypts
+the actual state and plan data. A complete example is in
+[`examples/default-key`](examples/default-key).
 
 ### 4. Run OpenTofu
 
@@ -95,6 +94,10 @@ tofu apply
 Enter your GPG passphrase when prompted. Continue using OpenTofu as usual: state
 is now stored encrypted, and saved plans created with `tofu plan -out=tfplan`
 are encrypted too.
+
+Read-only commands such as `tofu state list` decrypt and verify the state without
+signing new keys. Initialization requires no private-key operations; a normal
+state read requires one GPG decryption operation, including with hardware tokens.
 
 ## Small team: shared state in S3
 
@@ -146,22 +149,33 @@ only their own private key.
 
 ### 2. Authorize every team member
 
-Start with `encryption.tf` from the quick start and replace its `key_provider`
-block with this one:
+Start with `encryption.tf` from the quick start. Inside `encryption`, add this
+policy provider and replace the `method` block with the one below:
 
 ```hcl
-key_provider "external" "gpg" {
+key_provider "external" "gpg_policy" {
   command = [
-    "opentofu-gpg-key-provider",
+    "opentofu-gpg-encryption", "policy",
     "--authorized-key", "ALICE_FULL_FINGERPRINT",
     "--authorized-key", "BOB_FULL_FINGERPRINT",
   ]
 }
+
+method "external" "gpg" {
+  keys            = key_provider.external.gpg_policy
+  encrypt_command = ["opentofu-gpg-encryption", "encrypt"]
+  decrypt_command = ["opentofu-gpg-encryption", "decrypt"]
+}
 ```
 
 Add another `--authorized-key` pair for each additional member, including your
-own key. Share this configuration with the team. On each computer, the provider
-automatically selects that member's private key from the authorized list.
+own key. Share this configuration with the team. On each computer, the program
+automatically selects that member's signing private key from the authorized list.
+
+The list is defined only once. The optional provider passes current public GPG
+policy to both method commands; it does no signing or decryption and requires no
+hardware-token confirmation. The `keys` argument carries this public policy,
+not an AES key. Authorization always comes from the current configuration.
 
 For new state, run `tofu init` and `tofu apply`. For existing shared state, follow
 the migration below first. Afterwards, any authorized member with backend access
@@ -177,15 +191,15 @@ through a variable file or `TF_VAR_gpg_authorized_keys` so it is available durin
 For an existing local or remote state file, OpenTofu needs a temporary migration
 setting to read the old, unencrypted state and write it encrypted.
 
-Keep the `key_provider` and `aes_gcm` blocks from your chosen setup. Inside
-`encryption`, temporarily replace the entire `state` block, including its
-`enforced = true` setting, with the following method and state blocks:
+Keep the external method and optional policy-provider blocks from your chosen
+setup. Inside `encryption`, temporarily replace the entire `state` block,
+including its `enforced = true` setting, with the following method and state blocks:
 
 ```hcl
 method "unencrypted" "migration" {}
 
 state {
-  method = method.aes_gcm.gpg
+  method = method.external.gpg
   fallback {
     method = method.unencrypted.migration
   }
@@ -199,6 +213,11 @@ This makes OpenTofu require encrypted state on subsequent runs.
 Create new saved plans after enabling encryption. Older plaintext state versions
 and backups remain unencrypted. See [OpenTofu's migration guide](https://opentofu.org/docs/language/state/encryption/#pre-existing-project)
 for more migration options, including existing saved plans.
+
+The earlier development `opentofu-gpg-key-provider`/`aes_gcm` format is not read
+by this method. Use the previous executable and configuration to
+[migrate that state to plaintext](https://opentofu.org/docs/language/state/encryption/#rolling-back-encryption),
+then follow the steps above to encrypt it in the new format. Recreate saved plans.
 
 ## Adding or removing team members
 
@@ -221,13 +240,19 @@ already decrypt.
 ### Choosing a key when you have several
 
 To use a particular key for a personal project, add one `--authorized-key` with
-its full primary-key fingerprint to the command, using the same syntax as the
-team example. The provider selects that key automatically.
+its full primary-key fingerprint to a policy-provider command, using the same
+syntax as the team example. Both method commands then receive that selection.
+You can also pass the same authorized-key options directly to both commands.
+
+If several local private-key identities are available, decryption requires an
+explicit authorized-key list. It never signs a probe or uses the message's own
+signatures to decide which identities to trust.
 
 ### GPG configuration
 
-The provider uses your usual GPG keyring and settings. If several authorized
-private keys are available, GPG chooses which one signs using its configuration.
+The program uses your usual GPG keyring and settings. If several authorized
+signing private keys are available, GPG chooses which one signs using its
+configuration.
 For example, you can select a default in `gpg.conf`:
 
 ```text
@@ -239,35 +264,49 @@ GPG normally reads `~/.gnupg/gpg.conf` on Linux and macOS, or
 location.
 
 If you already use `local-user` settings, they override `default-key`. Every
-configured `local-user` must be authorized, and all selected private keys must be
-available when OpenTofu runs. Use the authorized-key list to control who can
-access the state; `default-recipient` and `encrypt-to` settings do not add readers.
+configured `local-user` must be authorized, and all selected signing private keys
+must be available when writing data. Reading requires a corresponding decryption
+private key and every original signer's public key and authorization. Use the
+authorized-key list to control who can access the state; `default-recipient` and
+`encrypt-to` settings do not add readers.
 
 ### Command-line options
 
+| Command | Purpose |
+| --- | --- |
+| `encrypt` | Sign and encrypt an actual state or plan payload. |
+| `decrypt` | Decrypt a payload and require valid, authorized signatures. |
+| `policy` | Pass public authorization and GPG settings through an optional external key provider. |
+
 | Option | Default | Description |
 | --- | --- | --- |
-| `--authorized-key FPR` | Selected signing keys | Full primary-key fingerprint authorized to read and write; repeatable. |
+| `--authorized-key FPR` | Local key selection | Full primary-key fingerprint authorized to read and write; repeatable. |
 | `--gpg PATH` | `gpg` | GnuPG executable, resolved through PATH unless a path is supplied. |
 | `--homedir PATH` | GPG's usual home | Use a different GPG home directory; takes precedence over `GNUPGHOME`. |
-| `--timeout DURATION` | `45s` | Time limit for a provider request, for example `30s`. |
+| `--timeout DURATION` | `45s` | Time limit for this command's request, for example `30s`. |
 | `--help` | | Print usage and exit. |
 | `--version` | | Print the build version and exit. |
 
-Put each option and its value in separate elements of the `command` array. You
+Put the subcommand, each option, and its value in separate array elements. You
 can use absolute executable paths if the tools are not on `PATH`. Paths containing
 spaces stay in a single element; use forward slashes or escaped backslashes in
-Windows HCL paths. The provider does not expand `~` in paths.
+Windows HCL paths. The program does not expand `~` in paths.
 
-OpenTofu 1.12/1.13 imposes a one-minute timeout on an external key provider.
+The policy provider shares `--authorized-key`, `--gpg`, and `--homedir` settings.
+When `keys` is supplied to a method, that policy supplies these settings. Set
+`--timeout` on the method commands to change their cryptographic-operation budget.
+
+OpenTofu 1.12/1.13 imposes a one-minute timeout on external encryption commands.
 Increasing `--timeout` cannot increase OpenTofu's limit. Complete any passphrase
 prompt or hardware-token confirmation within that time budget.
 
 ### Passphrase prompts and unattended runs
 
-OpenTofu needs access to your signing private key even for commands that only
-read state. GPG handles passphrase prompts, caching, and hardware-token access
-through its agent.
+GPG handles passphrase prompts, caching, and hardware-token access through its
+agent. Reading a payload requires one decryption operation and no signing
+operations. Each actual write requires one signing operation per selected signer;
+OpenTofu may write multiple state checkpoints during an apply. Policy-provider
+requests and method initialization perform no private-key operations.
 
 On Linux and macOS, terminal pinentry commonly needs `GPG_TTY` set in the shell
 that launches OpenTofu:
@@ -277,7 +316,7 @@ export GPG_TTY=$(tty)
 ```
 
 For unattended CI, provision the required keys and an agent that can use them
-before starting OpenTofu. The provider has no passphrase option; unlocking keys
+before starting OpenTofu. The program has no passphrase option; unlocking keys
 is handled through GPG.
 
 For source builds, implementation details, and contributor checks, see

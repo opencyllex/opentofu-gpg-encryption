@@ -1,14 +1,14 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
-project_name: opentofu-gpg-key-provider
+project_name: opentofu-gpg-encryption
 
 release:
   draft: true
 
 builds:
-  - id: key-provider
-    main: ./cmd/opentofu-gpg-key-provider
-    binary: opentofu-gpg-key-provider
+  - id: encryption
+    main: ./cmd/opentofu-gpg-encryption
+    binary: opentofu-gpg-encryption
     env:
       - CGO_ENABLED=0
     goos:

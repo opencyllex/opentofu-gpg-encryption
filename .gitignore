@@ -1,7 +1,7 @@
 /bin/
 /dist/
 /coverage.out
-/opentofu-gpg-key-provider
+/opentofu-gpg-encryption
 *.exe
 *.test
 .terraform/
