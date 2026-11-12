@@ -17,7 +17,8 @@ const (
 	maxInputSize    = 1024 * 1024
 )
 
-// KeyWrapper protects and recovers data encryption keys.
+// KeyWrapper protects and recovers data encryption keys. Encrypt is called
+// before Decrypt so authorization can be established independently of input.
 type KeyWrapper interface {
 	Encrypt(context.Context, []byte) ([]byte, error)
 	Decrypt(context.Context, []byte) ([]byte, error)
@@ -71,7 +72,6 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 		return fmt.Errorf("parse metadata: %w", err)
 	}
 
-	var decryptionKey []byte
 	if previous != nil {
 		if previous.ExternalData == nil {
 			return errors.New("input metadata is missing external_data")
@@ -82,14 +82,6 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 		if len(previous.ExternalData.EncryptedKey) == 0 {
 			return errors.New("input metadata is missing encrypted_key")
 		}
-		decryptionKey, err = wrapper.Decrypt(ctx, previous.ExternalData.EncryptedKey)
-		if err != nil {
-			return fmt.Errorf("recover decryption key: %w", err)
-		}
-		defer clear(decryptionKey)
-		if len(decryptionKey) != keyLength {
-			return fmt.Errorf("decrypted key must be %d bytes, got %d", keyLength, len(decryptionKey))
-		}
 	}
 
 	encryptionKey := make([]byte, keyLength)
@@ -98,6 +90,17 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, wrapper KeyWrap
 	wrappedKey, err := wrapper.Encrypt(ctx, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("protect encryption key: %w", err)
+	}
+	var decryptionKey []byte
+	if previous != nil {
+		decryptionKey, err = wrapper.Decrypt(ctx, previous.ExternalData.EncryptedKey)
+		if err != nil {
+			return fmt.Errorf("recover decryption key: %w", err)
+		}
+		defer clear(decryptionKey)
+		if len(decryptionKey) != keyLength {
+			return fmt.Errorf("decrypted key must be %d bytes, got %d", keyLength, len(decryptionKey))
+		}
 	}
 	result := response{
 		Keys: keys{EncryptionKey: encryptionKey, DecryptionKey: decryptionKey},

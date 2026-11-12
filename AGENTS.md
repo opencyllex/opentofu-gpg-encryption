@@ -15,7 +15,7 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 - `internal/provider`: protocol exchange, metadata, and data-key lifecycle.
 - `internal/gpg`: direct GnuPG subprocess invocation and machine-status checks.
 - `integration`: executable-level tests with real GPG and OpenTofu.
-- `examples`: complete HCL configurations for default and explicit recipients.
+- `examples`: complete HCL configurations for default and explicit authorized keys.
 - `.github/workflows`: three-OS tests and tag-triggered releases.
 - `.goreleaser.yaml`: six build targets, archives, and checksums.
 
@@ -42,10 +42,23 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
 - Let GPG resolve its home and read `gpg.conf`. The provider does not parse that
   configuration or invoke `gpgconf`. Override text mode so binary data keys
   round-trip unchanged.
-- Recipients are optional and repeatable. Explicit recipients override GPG's
-  default recipient; otherwise GPG applies `default-recipient` or
-  `default-recipient-self`. Preserve configured `encrypt-to` recipients and GPG's
-  trust model. Missing recipients fail in batch mode.
+- Authorized keys are optional, repeatable full primary-key fingerprints. Each
+  key can decrypt data keys and authenticate signatures on recovered data keys.
+  Automatically select the sole authorized key with a usable signing secret key,
+  including signing subkeys. If several are eligible, GPG configuration selects
+  the signer (`default-key` or `local-user`, otherwise the first secret key).
+  Multiple `local-user` entries may produce multiple signatures; every signer
+  must be authorized. Preserve `gpg.conf`, including additive `local-user` entries.
+  Without explicit authorized keys, implicitly authorize every freshly selected
+  signer; no-flags single-user mode must work without signer configuration.
+  Ignore `default-recipient*` and `encrypt-to` settings; preserve GPG's trust model.
+  Every selected signing secret key is required on every invocation.
+- Sign each new data key before encryption. Resolve implicit authorization from
+  the signature on the freshly generated key, independently of stored metadata,
+  before recovering the previous key. Reject writes by unauthorized signers.
+- The signed plaintext is `OpenTofu-GPG-Key-Provider:data-key:v1`, a NUL byte,
+  then the 32-byte data key. Require this purpose tag on recovery so generic GPG
+  signatures cannot be repurposed as data-key authorizations.
 - Use `gpg-agent` and default pinentry for private-key operations. Agent and
   hardware-token policy belong to GnuPG. Passphrase inputs are outside the CLI's
   scope.
@@ -53,6 +66,12 @@ Support Windows, Linux, and macOS, including amd64 and arm64 release builds.
   machine-readable status as well as its exit code. Require positive integrity
   verification for both MDC and AEAD. GPG can successfully unpack an unencrypted
   literal packet, which must not be accepted as a wrapped key.
+- Require at least one binary signature; every signature must be valid and every
+  signer an authorized primary fingerprint (or its signing subkey). Reject
+  unsigned, invalid, expired, revoked, and unrelated signatures, including an
+  unauthorized co-signature alongside a valid authorized signature, even when
+  GPG succeeds or signature verification is skipped in its configuration.
+  Existing unsigned wrapped keys are intentionally unsupported.
 - Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
   diagnostic output containing session keys when `show-session-key` is enabled.
 - OpenTofu imposes a one-minute external-provider timeout in versions 1.12/1.13;

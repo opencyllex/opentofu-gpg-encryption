@@ -7,42 +7,136 @@ import (
 	"fmt"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
+// Bind signatures to this protocol rather than arbitrary 32-byte files signed
+// by the same GPG key for other purposes.
+const keyPurpose = "OpenTofu-GPG-Key-Provider:data-key:v1\x00"
+
 // Client invokes GnuPG with its normal configuration, keyring, and agent.
-// A nil or empty Recipients slice leaves recipient selection to GnuPG.
+// Encrypt establishes authorized keys before Decrypt authenticates input.
 type Client struct {
-	Executable string
-	HomeDir    string
-	Recipients []string
+	Executable     string
+	HomeDir        string
+	AuthorizedKeys []string
+
+	authorizedKeys []string
 }
 
-// Encrypt wraps a data key for the configured GPG recipients.
-func (c Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
-	args := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--set-filename", ""}
-	for _, recipient := range c.Recipients {
-		args = append(args, "--recipient", recipient)
+// Encrypt automatically selects the sole eligible signer, or uses GPG's signer
+// selection when several are available. Every resulting signer must be authorized.
+func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
+	selected, err := c.selectSigner(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GPG signing failed: %w", err)
+	}
+	signArgs := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--set-filename", ""}
+	if selected != "" {
+		signArgs = append(signArgs, "--local-user", selected)
+	}
+	signArgs = append(signArgs, "--sign", "--", "-")
+	message := append([]byte(keyPurpose), plaintext...)
+	defer clear(message)
+	signed, status, err := c.run(ctx, message, signArgs)
+	if err != nil {
+		return nil, fmt.Errorf("GPG signing failed: %w", err)
+	}
+	defer clear(signed)
+	if len(status.createdSigners) == 0 {
+		return nil, errors.New("GPG did not create a binary signature")
+	}
+	var signers []string
+	for _, fingerprint := range status.createdSigners {
+		signer, err := c.primaryFingerprint(ctx, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if len(c.AuthorizedKeys) != 0 && !slices.Contains(c.AuthorizedKeys, signer) {
+			return nil, fmt.Errorf("GPG signing key %s is not authorized; add its primary fingerprint with --authorized-key or change default-key/local-user in gpg.conf; every configured local-user must be authorized", signer)
+		}
+		if !slices.Contains(signers, signer) {
+			signers = append(signers, signer)
+		}
+	}
+	authorized := c.AuthorizedKeys
+	if len(authorized) == 0 {
+		authorized = signers
+	}
+
+	// The input is already a signed OpenPGP packet stream. Do not put it in
+	// another literal packet: decryption must also verify the inner signature.
+	args := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--no-literal", "--no-default-recipient", "--no-encrypt-to", "--no-groups"}
+	for _, fingerprint := range authorized {
+		args = append(args, "--recipient", fingerprint)
 	}
 	args = append(args, "--encrypt", "--", "-")
-	output, status, err := c.run(ctx, plaintext, args)
+	output, status, err := c.run(ctx, signed, args)
 	if err != nil {
-		if status.noRecipients && len(c.Recipients) == 0 {
-			return nil, fmt.Errorf("no usable GPG recipient; supply --recipient or configure default-recipient/default-recipient-self in gpg.conf: %w", err)
-		}
 		return nil, fmt.Errorf("GPG encryption failed: %w", err)
 	}
 	if !status.encrypted || !status.integrityProtected {
 		return nil, errors.New("GPG did not produce integrity-protected encrypted key material")
 	}
+	c.authorizedKeys = authorized
 	return output, nil
 }
 
-// Decrypt recovers a data key through gpg-agent and rejects unauthenticated or
-// unencrypted input, even if GPG successfully extracts a literal data packet.
-func (c Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
-	output, status, err := c.run(ctx, ciphertext, []string{"--max-output", "32", "--decrypt", "--", "-"})
+func (c *Client) selectSigner(ctx context.Context) (string, error) {
+	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--with-secret", "--list-secret-keys"})
+	if err != nil {
+		return "", fmt.Errorf("list GPG signing keys: %w", err)
+	}
+	var candidates []string
+	var primary string
+	var usable, signingSecret bool
+	collect := func() {
+		if usable && signingSecret && (len(c.AuthorizedKeys) == 0 || slices.Contains(c.AuthorizedKeys, primary)) {
+			candidates = append(candidates, primary)
+		}
+	}
+	for line := range strings.SplitSeq(string(listing), "\n") {
+		fields := strings.Split(line, ":")
+		switch fields[0] {
+		case "sec":
+			collect()
+			primary, usable, signingSecret = "", false, false
+			if len(fields) >= 15 {
+				// Uppercase S describes usable signing capability across the
+				// whole key; lowercase s describes this particular key packet.
+				usable = strings.Contains(fields[11], "S") && !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ired")
+				signingSecret = strings.Contains(fields[11], "s") && fields[14] != "" && fields[14] != "#"
+			}
+		case "ssb":
+			if len(fields) >= 15 && !strings.ContainsAny(fields[1], "ired") && strings.Contains(fields[11], "s") && fields[14] != "" && fields[14] != "#" {
+				signingSecret = true
+			}
+		case "fpr":
+			if primary == "" && len(fields) >= 10 {
+				primary = fields[9]
+			}
+		}
+	}
+	collect()
+	switch len(candidates) {
+	case 0:
+		if len(c.AuthorizedKeys) != 0 {
+			return "", errors.New("no authorized GPG key has a usable signing secret key")
+		}
+		return "", errors.New("no usable GPG signing secret key is available")
+	case 1:
+		return candidates[0], nil
+	default:
+		return "", nil
+	}
+}
+
+// Decrypt requires integrity-protected public-key encryption and valid binary
+// signatures exclusively from authorized primary keys or their signing subkeys.
+func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
+	output, status, err := c.run(ctx, ciphertext, []string{"--max-output", strconv.Itoa(len(keyPurpose) + 32), "--decrypt", "--", "-"})
 	if err != nil {
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
@@ -50,12 +144,49 @@ func (c Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) 
 		clear(output)
 		return nil, errors.New("GPG did not confirm integrity-protected public-key decryption")
 	}
-	return output, nil
+	if status.plaintexts != 1 || status.signatureFailed || len(status.validSigners) == 0 {
+		clear(output)
+		return nil, errors.New("GPG did not confirm valid binary signatures from authorized keys")
+	}
+	for _, signer := range status.validSigners {
+		if !slices.Contains(c.authorizedKeys, signer) {
+			clear(output)
+			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signer)
+		}
+	}
+	key, ok := bytes.CutPrefix(output, []byte(keyPurpose))
+	if !ok {
+		clear(output)
+		return nil, errors.New("GPG-signed message is not tagged as an OpenTofu data key")
+	}
+	return key, nil
+}
+
+func (c *Client) primaryFingerprint(ctx context.Context, fingerprint string) (string, error) {
+	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--list-keys", "--", fingerprint})
+	if err != nil {
+		return "", fmt.Errorf("identify GPG signing key: %w", err)
+	}
+	primary := false
+	for line := range strings.SplitSeq(string(listing), "\n") {
+		fields := strings.Split(line, ":")
+		switch fields[0] {
+		case "pub":
+			primary = true
+		case "sub":
+			primary = false
+		case "fpr":
+			if primary && len(fields) >= 10 {
+				return fields[9], nil
+			}
+		}
+	}
+	return "", errors.New("GPG did not identify the signing key's primary fingerprint")
 }
 
 func (c Client) run(ctx context.Context, input []byte, operation []string) ([]byte, operationStatus, error) {
 	// GPG reads gpg.conf itself. Command-line settings keep its data on pipes
-	// and its prompts in pinentry, while preserving configured recipients.
+	// and its prompts in pinentry.
 	args := []string{
 		"--batch", "--no-tty", "--no-verbose", "--debug-level", "none",
 		"--pinentry-mode", "default",
@@ -95,7 +226,10 @@ type operationStatus struct {
 	integrityProtected bool
 	integrityVerified  bool
 	integrityFailed    bool
-	noRecipients       bool
+	createdSigners     []string
+	validSigners       []string
+	signatureFailed    bool
+	plaintexts         int
 	diagnostics        string
 }
 
@@ -132,8 +266,23 @@ func readStatus(stderr string) operationStatus {
 			status.integrityVerified = true
 		case "BADMDC", "DECRYPTION_FAILED":
 			status.integrityFailed = true
-		case "NO_RECP", "INV_RECP":
-			status.noRecipients = true
+		case "SIG_CREATED":
+			if len(fields) >= 7 && fields[1] == "S" && fields[4] == "00" {
+				status.createdSigners = append(status.createdSigners, fields[6])
+			}
+		case "VALIDSIG":
+			// The final fingerprint identifies the primary key even when a
+			// signing subkey made the signature. Only binary signatures bind
+			// every byte; text signatures canonicalize line endings.
+			if len(fields) >= 11 && fields[9] == "00" {
+				status.validSigners = append(status.validSigners, fields[10])
+			} else {
+				status.signatureFailed = true
+			}
+		case "BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG", "REVKEYSIG":
+			status.signatureFailed = true
+		case "PLAINTEXT":
+			status.plaintexts++
 		case "SESSION_KEY":
 			if len(fields) >= 2 {
 				_, key, _ := strings.Cut(fields[1], ":")

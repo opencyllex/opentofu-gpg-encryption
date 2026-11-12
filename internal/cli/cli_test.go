@@ -25,8 +25,8 @@ func TestHelpAndVersion(t *testing.T) {
 			if flag == "--version" && stdout.String() != "opentofu-gpg-key-provider 1.2.3\n" {
 				t.Fatalf("version output: %s", &stdout)
 			}
-			if flag == "--help" && !strings.Contains(stderr.String(), "default-recipient") {
-				t.Fatalf("help does not explain optional recipients: %s", &stderr)
+			if flag == "--help" && (!strings.Contains(stderr.String(), "authorize the selected signing keys") || !strings.Contains(stderr.String(), "sole eligible signing key")) {
+				t.Fatalf("help does not explain signer selection and default authorization: %s", &stderr)
 			}
 		})
 	}
@@ -35,7 +35,13 @@ func TestHelpAndVersion(t *testing.T) {
 func TestInvalidArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"--unknown"}, {"--timeout", "0s"}, {"--timeout", "-1s"},
-		{"--recipient", ""}, {"--recipient"}, {"--gpg", ""}, {"positional"},
+		{"--authorized-key", ""}, {"--authorized-key"}, {"--gpg", ""}, {"positional"},
+		{"--recipient", strings.Repeat("A", 40)},
+		{"--authorized-key", "person@example.invalid"},
+		{"--authorized-key", "0123456789ABCDEF"},
+		{"--authorized-key", strings.Repeat("G", 40)},
+		{"--authorized-key", "0x" + strings.Repeat("A", 40)},
+		{"--authorized-key", strings.Repeat("A", 40) + "!"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

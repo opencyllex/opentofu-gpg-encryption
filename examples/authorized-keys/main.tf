@@ -1,5 +1,5 @@
-variable "gpg_recipients" {
-  description = "Full GPG fingerprints of the recipients allowed to decrypt the data keys."
+variable "gpg_authorized_keys" {
+  description = "Full GPG primary-key fingerprints authorized to read and write the state and saved plans."
   type        = list(string)
 }
 
@@ -8,7 +8,7 @@ terraform {
     key_provider "external" "gpg" {
       command = concat(
         ["opentofu-gpg-key-provider"],
-        flatten([for recipient in var.gpg_recipients : ["--recipient", recipient]])
+        flatten([for fingerprint in var.gpg_authorized_keys : ["--authorized-key", fingerprint]])
       )
     }
 
@@ -29,5 +29,5 @@ terraform {
 }
 
 resource "terraform_data" "example" {
-  input = "An example value encrypted for the configured recipients."
+  input = "An example value protected for the configured authorized keys."
 }

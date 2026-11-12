@@ -21,5 +21,5 @@ terraform {
 }
 
 resource "terraform_data" "example" {
-  input = "An example value protected in state and saved plans."
+  input = "An example value protected using GPG's default signing key."
 }

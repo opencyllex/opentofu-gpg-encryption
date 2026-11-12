@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,16 +18,18 @@ import (
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
 	flags := flag.NewFlagSet("opentofu-gpg-key-provider", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	var recipients recipientFlags
-	flags.Var(&recipients, "recipient", "GPG recipient fingerprint (repeatable; defaults to GPG configuration)")
+	var authorizedKeys authorizedKeyFlags
+	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the selected signing keys)")
 	executable := flags.String("gpg", "gpg", "GnuPG executable name or path")
 	homeDir := flags.String("homedir", "", "GnuPG home directory (defaults to GPG's normal home resolution)")
 	timeout := flags.Duration("timeout", 45*time.Second, "Time budget for metadata input and GPG operations")
 	showVersion := flags.Bool("version", false, "Print the executable version and exit")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: opentofu-gpg-key-provider [options]")
-		fmt.Fprintln(stderr, "\nProvides GPG-protected AES-256 keys to OpenTofu over stdin/stdout.")
-		fmt.Fprintln(stderr, "With no --recipient, GPG uses default-recipient or default-recipient-self.")
+		fmt.Fprintln(stderr, "\nProvides GPG-signed and encrypted AES-256 keys to OpenTofu over stdin/stdout.")
+		fmt.Fprintln(stderr, "With no --authorized-key, authorize the selected signing keys.")
+		fmt.Fprintln(stderr, "A sole eligible signing key is selected automatically; otherwise GPG uses local-user, default-key, or its first secret key.")
+		fmt.Fprintln(stderr, "Every configured local-user must be authorized.")
 		fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
@@ -55,7 +58,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
-	client := gpg.Client{Executable: *executable, HomeDir: *homeDir, Recipients: recipients}
+	client := &gpg.Client{Executable: *executable, HomeDir: *homeDir, AuthorizedKeys: authorizedKeys}
 	if err := provider.Run(ctx, stdin, stdout, client); err != nil {
 		fmt.Fprintf(stderr, "opentofu-gpg-key-provider: %v\n", err)
 		return 1
@@ -63,14 +66,17 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	return 0
 }
 
-type recipientFlags []string
+type authorizedKeyFlags []string
 
-func (r *recipientFlags) String() string { return strings.Join(*r, ", ") }
+func (a *authorizedKeyFlags) String() string { return strings.Join(*a, ", ") }
 
-func (r *recipientFlags) Set(value string) error {
-	if strings.TrimSpace(value) == "" {
-		return errors.New("recipient must not be empty")
+func (a *authorizedKeyFlags) Set(value string) error {
+	if len(value) != 40 && len(value) != 64 {
+		return errors.New("authorized key must be a full GPG primary-key fingerprint (40 or 64 hexadecimal characters)")
 	}
-	*r = append(*r, value)
+	if _, err := hex.DecodeString(value); err != nil {
+		return errors.New("authorized key fingerprint must contain only hexadecimal characters")
+	}
+	*a = append(*a, strings.ToUpper(value))
 	return nil
 }
