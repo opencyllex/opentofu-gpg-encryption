@@ -69,7 +69,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	config := policy.Config{Version: policy.Version, GPG: *executable, HomeDir: *homeDir, AuthorizedKeys: authorizedKeys, RetiredKeys: retiredKeys}
-	if err := config.Validate(); err != nil {
+	if err := config.Validate("--authorized-key", "--retired-key"); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}

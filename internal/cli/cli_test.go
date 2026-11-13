@@ -67,13 +67,42 @@ func TestInvalidArguments(t *testing.T) {
 }
 
 func TestInvalidFingerprintDiagnostics(t *testing.T) {
-	for _, option := range []string{"--authorized-key", "--retired-key"} {
+	for _, keys := range []struct {
+		option string
+		field  string
+	}{
+		{"--authorized-key", "authorized_keys"},
+		{"--retired-key", "retired_keys"},
+	} {
 		for _, value := range []string{"ABCDEF", strings.Repeat("G", 40)} {
-			t.Run(option+" "+value, func(t *testing.T) {
+			t.Run(keys.option+" "+value, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
-				code := cli.Run(t.Context(), []string{"policy", option, value}, strings.NewReader("null"), &stdout, &stderr, "dev")
-				if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), option) || !strings.Contains(stderr.String(), `"`+value+`"`) || !strings.Contains(stderr.String(), "fingerprint") {
+				code := cli.Run(t.Context(), []string{"policy", keys.option, value}, strings.NewReader("null"), &stdout, &stderr, "dev")
+				if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), keys.option+": ") || !strings.Contains(stderr.String(), `"`+value+`"`) || !strings.Contains(stderr.String(), "fingerprint") {
 					t.Fatalf("invalid fingerprint lost its diagnostic context: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
+				}
+			})
+			t.Run(keys.field+" "+value, func(t *testing.T) {
+				config := map[string]any{
+					"version": 2, "authorized_keys": []string{}, "retired_keys": []string{},
+					"gpg": "must-not-run-gpg", "homedir": "",
+				}
+				config[keys.field] = []string{value}
+				policy, err := json.Marshal(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				input, err := json.Marshal(map[string][]byte{"payload": {1}, "key": policy})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				code := cli.Run(t.Context(), []string{"decrypt"}, bytes.NewReader(input), &stdout, &stderr, "dev")
+				if code != 1 || stdout.String() != "{\"magic\":\"OpenTofu-External-Encryption-Method\",\"version\":1}\n" ||
+					!strings.Contains(stderr.String(), "parse GPG policy: "+keys.field+": ") ||
+					!strings.Contains(stderr.String(), `"`+value+`"`) || !strings.Contains(stderr.String(), "fingerprint") ||
+					strings.Contains(stderr.String(), "--authorized-key") || strings.Contains(stderr.String(), "--retired-key") {
+					t.Fatalf("invalid policy fingerprint lost its field context: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
 				}
 			})
 		}

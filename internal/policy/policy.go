@@ -38,22 +38,22 @@ func (c Config) Encode() []byte {
 }
 
 // Validate normalizes public fingerprints and keeps active and retired keys
-// disjoint at the CLI and policy-input boundaries.
-func (c *Config) Validate() error {
+// disjoint. The labels identify the fingerprint lists at the input boundary.
+func (c *Config) Validate(authorizedLabel, retiredLabel string) error {
 	if strings.TrimSpace(c.GPG) == "" {
 		return errors.New("GPG policy must name a GnuPG executable")
 	}
 	for _, keys := range []struct {
-		option       string
+		label        string
 		fingerprints []string
 	}{
-		{"--authorized-key", c.AuthorizedKeys},
-		{"--retired-key", c.RetiredKeys},
+		{authorizedLabel, c.AuthorizedKeys},
+		{retiredLabel, c.RetiredKeys},
 	} {
 		for i, value := range keys.fingerprints {
 			fingerprint, err := normalizeFingerprint(value)
 			if err != nil {
-				return fmt.Errorf("%s: %w", keys.option, err)
+				return fmt.Errorf("%s: %w", keys.label, err)
 			}
 			keys.fingerprints[i] = fingerprint
 		}
@@ -86,7 +86,7 @@ func (c *Config) UnmarshalJSON(input []byte) error {
 		return fmt.Errorf("unsupported GPG policy version %d", *version)
 	}
 	*c = Config{Version: *version, AuthorizedKeys: *authorized, RetiredKeys: *retired, GPG: *executable, HomeDir: *home}
-	return c.Validate()
+	return c.Validate("authorized_keys", "retired_keys")
 }
 
 func normalizeFingerprint(value string) (string, error) {
