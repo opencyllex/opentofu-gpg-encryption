@@ -22,7 +22,7 @@ signed version.
 
 ### 1. Install the tools
 
-Install [OpenTofu](https://opentofu.org/docs/intro/install/) and GnuPG 2.2 or newer:
+Install GnuPG 2.2 or newer:
 
 - **Linux** (Debian/Ubuntu): `sudo apt-get install gnupg`.
 - **macOS**: `brew install gnupg`.
