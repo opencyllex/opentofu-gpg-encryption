@@ -40,11 +40,11 @@ implementation, build, and release details in this file.
   base64 `key`; output contains a base64 `payload`. Runtime stdout is exclusively
   protocol JSON.
 - The optional method `key` is a versioned public policy, not AES key material.
-  Version 2 contains `version`, `authorized_keys`, `allow_revoked_signers`, `gpg`,
-  and `homedir`. Version 1 remains readable with exactly its original fields and
-  no recovery exceptions. Emit version 2 policies, including an empty recovery
-  list when unused. Policy supplies the current key roles and GPG executable/home
-  to both operations.
+  Version 2 contains `version`, `authorized_keys`, `retired_keys`, `gpg`,
+  and `homedir`. Emit and accept only this format, including an empty retired-key
+  list when unused. Earlier unshipped policy formats are intentionally unsupported;
+  policies are never stored in state. Policy supplies the current key roles and
+  GPG executable/home to both operations.
   With no policy input, use the command-line settings and normal GPG home.
   Reject method configuration flags when a policy key is present; only `--timeout`
   may be supplied on those method commands.
@@ -107,8 +107,8 @@ freshness or bind data to one project.
   must be authorized. Preserve `gpg.conf`, including additive `local-user` entries.
   Selecting a sole eligible key overrides `default-key`, but does not remove
   configured `local-user` signers. With no eligible key, fail the write.
-  With neither key-role option supplied, both operations implicitly authorize the
-  sole local private-key identity that is not invalid, revoked, or disabled; expired
+  Without `--authorized-key` or `--retired-key`, both operations implicitly authorize
+  the sole local private-key identity that is not invalid, revoked, or disabled; expired
   identities still count. Require an explicit list when more than one is present
   and fail writes before signing. Merge duplicate keyring entries by primary
   fingerprint. Never sign a probe or trust identities selected by the ciphertext
@@ -121,14 +121,20 @@ freshness or bind data to one project.
   Every selected signing secret key is required for writes. Reading requires a
   corresponding decryption private key and every original signer's public key
   and authorization, but does not require a signing private key.
-- `--allow-revoked-signer` is repeatable full-primary-fingerprint authorization for
-  recovery reads only, including signatures by that primary's signing subkeys.
-  Waive only revocation for these identities, never cryptographic validity,
+- `--retired-key` is repeatable full-primary-fingerprint authorization for reads
+  only, including historical signatures by expired keys and their signing subkeys.
+  It also accepts otherwise-valid signatures despite revocation. Waive only
+  revocation for these identities, never cryptographic validity,
   signature expiry, binary signature class, purpose tagging, or integrity checks.
   They are not active signing keys or new encryption recipients. Reject overlap
   with `--authorized-key`, including case variants. If either role is supplied,
-  disable implicit authorization; recovery-only configuration must not write.
-  Transport exceptions only in the current trusted policy, never stored metadata.
+  disable implicit authorization; a configuration with only retired keys must not write.
+  Transport retired-key authorization only in the current trusted policy, never stored metadata.
+- Before signing, require usable encryption capability (uppercase `E` in GPG's
+  public-key listing) for every active authorized key. Diagnose expired primary
+  keys and encryption subkeys by primary fingerprint, with renewal or retirement
+  guidance. One unusable recipient blocks every member's writes. An expired
+  encryption subkey must not block another usable encryption key for that identity.
 - Sign actual payloads before encryption and reject every unauthorized signer.
   Encrypt signed OpenPGP packets with `--no-literal` to avoid adding a literal
   wrapper that would prevent decryption from verifying the inner signatures.
@@ -160,11 +166,16 @@ freshness or bind data to one project.
   on `REVKEYSIG`/`KEYREVOKED`. Resolve exceptions per primary identity; one allowed
   signer must not exempt another revoked co-signer.
   Expired signing keys cannot write. Diagnose them separately from missing
-  private keys.
+  private keys, naming the primary fingerprint. Revocation diagnostics also name
+  the primary fingerprint needed by `--retired-key`, with subkeys as extra detail.
   Renewal and sharing updated public keys are needed for continued writes, not
   historical reads.
 - Reject integrity failures even when `ignore-mdc-error` is configured. Suppress
   diagnostic output containing session keys when `show-session-key` is enabled.
+- Pre-size GPG output buffers for ordinary uncompressed payloads, and clear old
+  allocations if growth is needed for compressed input or additional packets.
+  Omit GPG's translated informational `--no-literal` note from diagnostics while
+  preserving errors about incompatible options.
 - OpenTofu imposes a one-minute external-command timeout in versions 1.12/1.13;
   the executable defaults to a 45-second budget.
 
@@ -180,9 +191,12 @@ entries for retired signers before rewriting.
 The team example includes an empty `terraform_data.gpg_rewrite` resource.
 At every policy-change step, run `tofu apply -replace=terraform_data.gpg_rewrite`
 to persist newly signed and encrypted state; a no-change apply does not upload
-remote state. Recovery moves a revoked signer to the read-only exception list,
-rewrites with a valid signer and active recipients, removes the exception, then
-repeats the replacement. Historical copies keep their original signatures.
+remote state. Review the complete plan before approval: replacement also applies
+other pending changes. If a departing key has expired or been revoked, move it to
+the read-only `--retired-key` list instead of attempting the normal first rewrite.
+Inspect and independently verify the recovered state, rewrite with a valid signer
+and active recipients, remove the retired key, then repeat the replacement.
+Historical copies keep their original signatures.
 
 Historical state, saved plans, and backups still require a decryption private key
 that could read them, every original signer's public key, and authorization of
@@ -198,7 +212,7 @@ CI tests the latest OpenTofu on Linux, macOS, and Windows.
 
 Use a small in-test HTTP server for remote-backend coverage, including locking,
 unchanged ciphertext and no uploads on policy-only no-change applies, forced
-rewrites for additions/removals, and the complete revoked-signer recovery cycle.
+rewrites for additions/removals, and the complete expired/revoked-key retirement cycle.
 Check stored encryption, increasing serials, stable lineage and application data,
 replacement IDs, signer authorization, and recipient access at the CLI boundary.
 

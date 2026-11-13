@@ -11,7 +11,7 @@ import (
 	"github.com/opencyllex/opentofu-gpg-encryption/internal/protocol"
 )
 
-// The stored marker has not changed with the public policy's v2 extension.
+// The stored marker is versioned independently of the public policy.
 const metadataVersion = 1
 
 type metadata struct {

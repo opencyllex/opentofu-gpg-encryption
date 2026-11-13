@@ -25,9 +25,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	flags := flag.NewFlagSet("opentofu-gpg-encryption", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	var authorizedKeys, allowRevokedSigners fingerprintFlags
+	var authorizedKeys, retiredKeys fingerprintFlags
 	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the sole usable local key)")
-	flags.Var(&allowRevokedSigners, "allow-revoked-signer", "Accept otherwise-valid signatures from this primary-key fingerprint despite revocation; does not authorize signing or add an encryption recipient (repeatable)")
+	flags.Var(&retiredKeys, "retired-key", "Full GPG primary-key fingerprint accepted for reads only, including otherwise-valid signatures despite revocation; never signs new writes or adds an encryption recipient (repeatable)")
 	executable := flags.String("gpg", "gpg", "GnuPG executable name or path")
 	homeDir := flags.String("homedir", "", "GnuPG home directory (defaults to GPG's normal home resolution)")
 	timeout := flags.Duration("timeout", 45*time.Second, "Time budget for request input and GPG operations")
@@ -36,9 +36,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "Usage: opentofu-gpg-encryption <encrypt|decrypt|policy> [options]")
 		fmt.Fprintln(stderr, "\nEncrypt signs and encrypts OpenTofu payloads; decrypt verifies every signer.")
 		fmt.Fprintln(stderr, "Policy transports public GPG settings through an optional external key provider.")
-		fmt.Fprintln(stderr, "A sole eligible signing key is selected automatically; with several authorized keys, GPG selects signers.")
-		fmt.Fprintln(stderr, "Without either key-role option, encryption and decryption require one unambiguous local key.")
-		fmt.Fprintln(stderr, "With --allow-revoked-signer, list active writers and recipients explicitly using --authorized-key.")
+		fmt.Fprintln(stderr, "A sole eligible signing key is selected automatically; with several eligible keys, GPG selects signers.")
+		fmt.Fprintln(stderr, "Without --authorized-key or --retired-key, encryption and decryption require one unambiguous local key.")
+		fmt.Fprintln(stderr, "With --retired-key, list active writers and recipients explicitly using --authorized-key.")
 		fmt.Fprintln(stderr, "Every configured local-user must be authorized when an explicit list is supplied.")
 		fmt.Fprintln(stderr, "With a policy key, put GPG settings on the policy provider; only --timeout is allowed on method commands.")
 		fmt.Fprintln(stderr)
@@ -73,7 +73,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
-	config := policy.Config{Version: policy.Version, GPG: *executable, HomeDir: *homeDir, AuthorizedKeys: authorizedKeys, AllowRevokedSigners: allowRevokedSigners}
+	config := policy.Config{Version: policy.Version, GPG: *executable, HomeDir: *homeDir, AuthorizedKeys: authorizedKeys, RetiredKeys: retiredKeys}
 	if err := config.Validate(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
@@ -84,7 +84,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	} else {
 		var configuredFlags []string
 		flags.Visit(func(option *flag.Flag) {
-			if option.Name != "timeout" {
+			if option.Name != "timeout" && option.Name != "version" {
 				configuredFlags = append(configuredFlags, "--"+option.Name)
 			}
 		})

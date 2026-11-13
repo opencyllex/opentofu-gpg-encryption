@@ -12,15 +12,15 @@ variable "gpg_authorized_keys" {
   }
 }
 
-variable "gpg_allow_revoked_signers" {
-  description = "Full GPG primary-key fingerprints accepted despite revocation for recovery reads only; never used for new signing or encryption recipients."
+variable "gpg_retired_keys" {
+  description = "Full GPG primary-key fingerprints accepted for reads only, including otherwise-valid signatures despite revocation; never used for new signing or encryption recipients."
   type        = list(string)
   default     = []
   nullable    = false
 
   validation {
     condition = alltrue([
-      for fingerprint in var.gpg_allow_revoked_signers :
+      for fingerprint in var.gpg_retired_keys :
       can(regex("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$", fingerprint))
     ])
     error_message = "Supply full GPG primary-key fingerprints (40 or 64 hexadecimal characters)."
@@ -33,7 +33,7 @@ terraform {
       command = concat(
         ["opentofu-gpg-encryption", "policy"],
         flatten([for fingerprint in var.gpg_authorized_keys : ["--authorized-key", fingerprint]]),
-        flatten([for fingerprint in var.gpg_allow_revoked_signers : ["--allow-revoked-signer", fingerprint]])
+        flatten([for fingerprint in var.gpg_retired_keys : ["--retired-key", fingerprint]])
       )
     }
 
@@ -60,4 +60,5 @@ resource "terraform_data" "example" {
 }
 
 # After each GPG policy-change step: tofu apply -replace=terraform_data.gpg_rewrite
+# Review the complete plan before approval; this also applies other pending changes.
 resource "terraform_data" "gpg_rewrite" {}

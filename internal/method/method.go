@@ -54,7 +54,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 	}
 	if data.Key != nil {
 		if len(configuredFlags) != 0 {
-			return fmt.Errorf("method flags %s cannot be used with a policy key; put GPG settings on the policy provider instead", strings.Join(configuredFlags, ", "))
+			return fmt.Errorf("%s cannot be used on a method command with a policy key; put GPG settings on the policy provider instead", strings.Join(configuredFlags, ", "))
 		}
 		encoded, err := base64.StdEncoding.DecodeString(*data.Key)
 		data.Key = nil
@@ -69,7 +69,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 			return fmt.Errorf("parse GPG policy: %w", err)
 		}
 	}
-	client := gpg.Client{Executable: config.GPG, HomeDir: config.HomeDir, AuthorizedKeys: config.AuthorizedKeys, AllowRevokedSigners: config.AllowRevokedSigners}
+	client := gpg.Client{Executable: config.GPG, HomeDir: config.HomeDir, AuthorizedKeys: config.AuthorizedKeys, RetiredKeys: config.RetiredKeys}
 	var output []byte
 	if operation == "encrypt" {
 		output, err = client.Encrypt(ctx, payload)

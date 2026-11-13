@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,14 +47,14 @@ func TestInvalidArguments(t *testing.T) {
 		{"policy", "--authorized-key", strings.Repeat("G", 40)},
 		{"policy", "--authorized-key", "0x" + strings.Repeat("A", 40)},
 		{"policy", "--authorized-key", strings.Repeat("A", 40) + "!"},
-		{"policy", "--allow-revoked-signer"},
-		{"policy", "--allow-revoked-signer", ""},
-		{"policy", "--allow-revoked-signer", "person@example.invalid"},
-		{"policy", "--allow-revoked-signer", "0123456789ABCDEF"},
-		{"policy", "--allow-revoked-signer", strings.Repeat("G", 40)},
-		{"policy", "--allow-revoked-signer", "0x" + strings.Repeat("A", 40)},
-		{"policy", "--allow-revoked-signer", strings.Repeat("A", 40) + "!"},
-		{"policy", "--authorized-key", strings.Repeat("A", 40), "--allow-revoked-signer", strings.Repeat("a", 40)},
+		{"policy", "--retired-key"},
+		{"policy", "--retired-key", ""},
+		{"policy", "--retired-key", "person@example.invalid"},
+		{"policy", "--retired-key", "0123456789ABCDEF"},
+		{"policy", "--retired-key", strings.Repeat("G", 40)},
+		{"policy", "--retired-key", "0x" + strings.Repeat("A", 40)},
+		{"policy", "--retired-key", strings.Repeat("A", 40) + "!"},
+		{"policy", "--authorized-key", strings.Repeat("A", 40), "--retired-key", strings.Repeat("a", 40)},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -106,7 +109,24 @@ func TestCancellationWhileWaitingForEOF(t *testing.T) {
 }
 
 func TestInvalidMethodRequests(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, name := t.TempDir(), "gpg"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), binary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	const unexpectedGPG = "unexpected GPG invocation"
+	t.Setenv(gpgTestStderr, unexpectedGPG)
 	for _, input := range []string{
 		"", "{", "null", "[]", "{}", `{"payload":null}`,
 		`{"payload":[1,2,3]}`, `{"payload":"!"}`,
@@ -119,7 +139,7 @@ func TestInvalidMethodRequests(t *testing.T) {
 		t.Run(input, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := cli.Run(t.Context(), []string{"decrypt"}, strings.NewReader(input), &stdout, &stderr, "dev")
-			if code != 1 || strings.Contains(stderr.String(), "list local GPG keys:") || strings.Count(stdout.String(), "\n") != 1 {
+			if code != 1 || strings.Contains(stderr.String(), unexpectedGPG) || strings.Count(stdout.String(), "\n") != 1 {
 				t.Fatalf("invalid method request: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
 			}
 		})
@@ -130,22 +150,23 @@ func TestInvalidPolicies(t *testing.T) {
 	for _, encoded := range []string{
 		`{}`, `null`, `{"version":2,"gpg":"must-not-run-gpg"}`,
 		`{"version":2,"authorized_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":1,"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":1,"authorized_keys":[],"gpg":"must-not-run-gpg","homedir":null}`,
-		`{"version":1,"authorized_keys":[],"gpg":"","homedir":""}`,
-		`{"version":1,"gpg":"must-not-run-gpg","authorized_keys":["person@example.invalid"],"homedir":""}`,
-		`{"version":1,"gpg":"must-not-run-gpg","unknown":true}`,
-		`{"version":1,"version":1,"gpg":"must-not-run-gpg"}`,
-		`{"version":3,"authorized_keys":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":1,"authorized_keys":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":1,"authorized_keys":[],"allow_revoked_signers":null,"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"allow_revoked_signers":null,"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"allow_revoked_signers":"not-an-array","gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"allow_revoked_signers":["person@example.invalid"],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"Allow_Revoked_Signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"allow_revoked_signers":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":[],"allow_revoked_signers":[],"allow_\u0072evoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
-		`{"version":2,"authorized_keys":["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"allow_revoked_signers":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":null}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":[],"gpg":"","homedir":""}`,
+		`{"version":2,"authorized_keys":["person@example.invalid"],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":"","unknown":true}`,
+		`{"version":2,"version":2,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":3,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":1,"authorized_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":1,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":null,"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":"not-an-array","gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":["person@example.invalid"],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"Retired_Keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"retired_keys":[],"\u0072etired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"retired_keys":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"gpg":"must-not-run-gpg","homedir":""}`,
 	} {
 		input, err := json.Marshal(map[string]string{"payload": "AQ==", "key": base64.StdEncoding.EncodeToString([]byte(encoded))})
 		if err != nil {
@@ -160,7 +181,7 @@ func TestInvalidPolicies(t *testing.T) {
 }
 
 func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
-	policy := []byte(`{"version":1,"authorized_keys":[],"gpg":"must-not-run-gpg","homedir":""}`)
+	policy := []byte(`{"version":2,"authorized_keys":[],"retired_keys":[],"gpg":"must-not-run-gpg","homedir":""}`)
 	input, err := json.Marshal(map[string][]byte{"payload": {1}, "key": policy})
 	if err != nil {
 		t.Fatal(err)
@@ -168,14 +189,14 @@ func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
 	for _, operation := range []string{"encrypt", "decrypt"} {
 		for _, options := range [][]string{
 			{"--authorized-key", strings.Repeat("A", 40)},
-			{"--allow-revoked-signer", strings.Repeat("B", 40)},
+			{"--retired-key", strings.Repeat("B", 40)},
 			{"--gpg", "gpg"},
 			{"--homedir", ""},
 		} {
 			t.Run(operation+" "+options[0], func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				code := cli.Run(t.Context(), append([]string{operation}, options...), bytes.NewReader(input), &stdout, &stderr, "dev")
-				if code != 1 || !strings.Contains(stderr.String(), options[0]+" cannot be used with a policy key") || strings.Count(stdout.String(), "\n") != 1 {
+				if code != 1 || !strings.Contains(stderr.String(), options[0]+" cannot be used on a method command with a policy key") || strings.Count(stdout.String(), "\n") != 1 {
 					t.Fatalf("conflicting method flag: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
 				}
 			})
@@ -183,13 +204,42 @@ func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
 	}
 }
 
-func TestRecoveryPolicyConfiguration(t *testing.T) {
+func TestDisabledVersionFlagWithPolicy(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := json.Marshal(map[string]any{
+		"version": 2, "authorized_keys": []string{strings.Repeat("A", 40)},
+		"retired_keys": []string{}, "gpg": executable, "homedir": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string][]byte{"payload": {1}, "key": policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const invoked = "GPG received the request"
+	t.Setenv(gpgTestStderr, invoked)
+	for _, operation := range []string{"encrypt", "decrypt"} {
+		t.Run(operation, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.Run(t.Context(), []string{operation, "--version=false"}, bytes.NewReader(input), &stdout, &stderr, "dev")
+			if code != 1 || !strings.Contains(stderr.String(), invoked) || strings.Count(stdout.String(), "\n") != 1 {
+				t.Fatalf("disabled version flag blocked the policy request: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
+			}
+		})
+	}
+}
+
+func TestRetiredKeyPolicyConfiguration(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cli.Run(t.Context(), []string{
 		"policy", "--gpg", "nonexistent-gpg-policy-must-not-run",
 		"--authorized-key", strings.Repeat("a", 40),
-		"--allow-revoked-signer", strings.Repeat("b", 40),
-		"--allow-revoked-signer", strings.Repeat("c", 64),
+		"--retired-key", strings.Repeat("b", 40),
+		"--retired-key", strings.Repeat("c", 64),
 	}, strings.NewReader(`{"external_data":{"policy_version":1}}`), &stdout, &stderr, "dev")
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, &stderr)
@@ -206,16 +256,16 @@ func TestRecoveryPolicyConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var policy struct {
-		Version             int      `json:"version"`
-		AuthorizedKeys      []string `json:"authorized_keys"`
-		AllowRevokedSigners []string `json:"allow_revoked_signers"`
+		Version        int      `json:"version"`
+		AuthorizedKeys []string `json:"authorized_keys"`
+		RetiredKeys    []string `json:"retired_keys"`
 	}
 	if err := json.Unmarshal(response.Keys.DecryptionKey, &policy); err != nil {
 		t.Fatal(err)
 	}
 	if policy.Version != 2 || len(policy.AuthorizedKeys) != 1 || policy.AuthorizedKeys[0] != strings.Repeat("A", 40) ||
-		len(policy.AllowRevokedSigners) != 2 || policy.AllowRevokedSigners[0] != strings.Repeat("B", 40) || policy.AllowRevokedSigners[1] != strings.Repeat("C", 64) {
-		t.Fatalf("unexpected recovery policy: %+v", policy)
+		len(policy.RetiredKeys) != 2 || policy.RetiredKeys[0] != strings.Repeat("B", 40) || policy.RetiredKeys[1] != strings.Repeat("C", 64) {
+		t.Fatalf("unexpected retired-key policy: %+v", policy)
 	}
 	if !bytes.Equal(response.Keys.EncryptionKey, response.Keys.DecryptionKey) || string(response.Meta) != `{"external_data":{"policy_version":1}}` {
 		t.Fatalf("unexpected policy keys or stored metadata: %s", body)

@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // This backend keeps only encrypted snapshots. Its lock protocol is exercised
@@ -301,5 +303,49 @@ func (h harness) testRemotePolicyChanges(t *testing.T) {
 		h.rewriteRemoteState(t, project, backend, state)
 		h.tofuCommand(t, project, "state", "list")
 		h.reject(t, "decrypt", secondHome, decodeStateEnvelope(t, original).Payload, nil, "has been revoked", bothOptions...)
+	})
+
+	t.Run("retire an expired unrevoked signer and remove its read authorization", func(t *testing.T) {
+		retiredHome, currentHome := h.home(t), h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		fakeTime := strconv.FormatInt(created.Unix(), 10)
+		retired := h.generateKey(t, retiredHome, "Remote Expired <remote-expired@example.invalid>", "--faked-system-time", fakeTime)
+		current := h.generateKeyWithUsage(t, currentHome, "Remote Current <remote-current@example.invalid>", "sign,encr", "2y", "--faked-system-time", fakeTime)
+		h.gpgCommand(t, retiredHome, h.gpgCommand(t, currentHome, nil, "--export", current), "--import")
+		h.gpgCommand(t, currentHome, h.gpgCommand(t, retiredHome, nil, "--export", retired), "--import")
+		configure(t, retiredHome, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		project, backend := h.remoteProject(t, retiredHome, []string{retired, current})
+		state := h.projectSnapshot(t, project)
+		original, writes := backend.snapshot()
+		configure(t, retiredHome, "")
+
+		h.writeProject(t, project, currentHome, true, retired, current)
+		h.projectSnapshot(t, project) // Key expiry alone still allows historical reads.
+		log := h.startTrace(t)
+		if output, err := h.runTofu(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color"); err == nil || !strings.Contains(strings.Join(strings.Fields(output), " "), "key "+retired+" has expired") {
+			t.Fatalf("the normal removal rewrite accepted an expired recipient: err=%v\n%s", err, output)
+		}
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["encrypt"] != 0 {
+			t.Fatalf("an expired remote recipient was detected after signing: %v", operations)
+		}
+		unchanged, currentWrites := backend.snapshot()
+		if currentWrites != writes || !bytes.Equal(original, unchanged) {
+			t.Fatal("a rejected write modified remote state")
+		}
+
+		h.writeProjectConfig(t, project, currentHome, true, []string{current}, []string{retired})
+		h.unchangedRemoteApply(t, project, backend)
+		h.projectSnapshot(t, project) // Inspect the recovered state before rewriting it.
+		state = h.rewriteRemoteState(t, project, backend, state)
+		stored, _ := backend.snapshot()
+		h.method(t, "decrypt", currentHome, decodeStateEnvelope(t, stored).Payload, nil, "--authorized-key", current)
+		h.reject(t, "decrypt", retiredHome, decodeStateEnvelope(t, stored).Payload, nil, "GPG decryption failed", "--authorized-key", current)
+
+		h.writeProject(t, project, currentHome, true, current)
+		h.unchangedRemoteApply(t, project, backend)
+		h.rewriteRemoteState(t, project, backend, state)
+		h.tofuCommand(t, project, "state", "list")
+		h.reject(t, "decrypt", currentHome, decodeStateEnvelope(t, original).Payload, nil, "signature from key "+retired+" is not authorized", "--authorized-key", current)
+		h.method(t, "decrypt", currentHome, decodeStateEnvelope(t, original).Payload, nil, "--authorized-key", current, "--retired-key", retired)
 	})
 }

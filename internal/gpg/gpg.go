@@ -20,14 +20,12 @@ const (
 	MaxPayloadSize = 256 * 1024 * 1024
 )
 
-var errExpiredKey = errors.New("GPG signing key has expired; renew it with gpg --quick-set-expire and share the updated public key before writing new state or plans")
-
 // Client invokes GnuPG with its normal configuration, keyring, and agent.
 type Client struct {
-	Executable          string
-	HomeDir             string
-	AuthorizedKeys      []string
-	AllowRevokedSigners []string
+	Executable     string
+	HomeDir        string
+	AuthorizedKeys []string
+	RetiredKeys    []string
 }
 
 // Encrypt requires a sole usable local identity when authorization is implicit.
@@ -38,9 +36,12 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	selected, err := c.selectSigner(keys)
+	selected, authorized, err := c.selectSigner(keys)
 	if err != nil {
-		return nil, fmt.Errorf("GPG signing failed: %w", err)
+		return nil, err
+	}
+	if err := c.checkRecipients(ctx, authorized); err != nil {
+		return nil, err
 	}
 	signArgs := []string{"--no-armor", "--no-textmode", "--compress-algo", "none", "--set-filename", "", "--no-ask-sig-expire", "--default-sig-expire", "0"}
 	if selected != "" {
@@ -48,17 +49,13 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 	}
 	signArgs = append(signArgs, "--sign", "--", "-")
 	message := io.MultiReader(strings.NewReader(payloadPurpose), bytes.NewReader(plaintext))
-	signed, status, err := c.run(ctx, message, signArgs)
+	signed, status, err := c.run(ctx, message, signArgs, packetOutputSizeHint(len(payloadPurpose)+len(plaintext), len(keys)))
 	if err != nil {
 		return nil, fmt.Errorf("GPG signing failed: %w", err)
 	}
 	defer clear(signed)
 	if len(status.createdSigners) == 0 {
 		return nil, errors.New("GPG did not create a binary signature")
-	}
-	authorized := c.AuthorizedKeys
-	if len(authorized) == 0 {
-		authorized = []string{selected}
 	}
 	for _, fingerprint := range status.createdSigners {
 		var signer string
@@ -83,7 +80,7 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 		args = append(args, "--recipient", fingerprint)
 	}
 	args = append(args, "--encrypt", "--", "-")
-	output, status, err := c.run(ctx, bytes.NewReader(signed), args)
+	output, status, err := c.run(ctx, bytes.NewReader(signed), args, packetOutputSizeHint(len(signed), len(authorized)))
 	if err != nil {
 		return nil, fmt.Errorf("GPG encryption failed: %w", err)
 	}
@@ -96,39 +93,108 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 	return output, nil
 }
 
-func (c *Client) selectSigner(keys []localKey) (string, error) {
+func (c *Client) selectSigner(keys []localKey) (string, []string, error) {
 	authorized := c.AuthorizedKeys
-	if len(authorized) == 0 && len(c.AllowRevokedSigners) == 0 {
+	if len(authorized) == 0 {
+		if len(c.RetiredKeys) != 0 {
+			return "", nil, errors.New("--retired-key only permits reads; list active members with --authorized-key to write")
+		}
 		fingerprint, err := implicitKey(keys)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		authorized = []string{fingerprint}
 	}
 	var candidates []string
-	var expired bool
+	var expired string
 	for _, key := range keys {
 		if slices.Contains(authorized, key.fingerprint) {
 			if key.canSign {
 				candidates = append(candidates, key.fingerprint)
 			}
-			expired = expired || key.expired || key.expiredSigning
+			if key.expired || key.expiredSigning {
+				expired = key.fingerprint
+			}
 		}
 	}
 	switch len(candidates) {
 	case 0:
-		if expired {
-			return "", errExpiredKey
+		if expired != "" {
+			return "", nil, fmt.Errorf("GPG signing key %s has expired; renew it with gpg --quick-set-expire and share the updated public key with other writers, or move it to --retired-key", expired)
 		}
-		if len(c.AuthorizedKeys) != 0 || len(c.AllowRevokedSigners) != 0 {
-			return "", errors.New("no authorized GPG key has a usable signing secret key")
+		if len(c.AuthorizedKeys) != 0 {
+			return "", nil, errors.New("no authorized GPG key has a usable signing secret key")
 		}
-		return "", errors.New("no usable GPG signing secret key is available")
+		return "", nil, errors.New("no usable GPG signing secret key is available")
 	case 1:
-		return candidates[0], nil
+		return candidates[0], authorized, nil
 	default:
-		return "", nil
+		return "", authorized, nil
 	}
+}
+
+// Check every recipient before signing, including members whose private keys
+// are not local. Uppercase E reports usable encryption capability for the whole
+// identity; an expired encryption subkey must not block a still-usable one.
+func (c *Client) checkRecipients(ctx context.Context, authorized []string) error {
+	args := append([]string{"--with-colons", "--with-fingerprint", "--list-options", "show-unusable-subkeys", "--list-keys"}, authorized...)
+	listing, _, err := c.run(ctx, nil, args, 0)
+	if err != nil {
+		return fmt.Errorf("list GPG encryption keys: %w", err)
+	}
+	type recipient struct {
+		fingerprint string
+		canEncrypt  bool
+		expired     bool
+		revoked     bool
+	}
+	var keys []recipient
+	for line := range strings.SplitSeq(string(listing), "\n") {
+		fields := strings.Split(line, ":")
+		switch fields[0] {
+		case "pub":
+			if len(fields) >= 12 {
+				keys = append(keys, recipient{
+					canEncrypt: strings.Contains(fields[11], "E") && !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ird"),
+					expired:    fields[1] == "e",
+					revoked:    fields[1] == "r",
+				})
+			}
+		case "sub":
+			if len(keys) != 0 && len(fields) >= 12 && strings.Contains(fields[11], "e") {
+				key := &keys[len(keys)-1]
+				key.expired = key.expired || fields[1] == "e"
+				key.revoked = key.revoked || fields[1] == "r"
+			}
+		case "fpr":
+			if len(keys) != 0 && len(fields) >= 10 && keys[len(keys)-1].fingerprint == "" {
+				keys[len(keys)-1].fingerprint = fields[9]
+			}
+		}
+	}
+	for _, fingerprint := range authorized {
+		// Duplicate keyring entries can describe the same primary identity.
+		var expired, revoked, canEncrypt bool
+		for _, key := range keys {
+			if key.fingerprint == fingerprint {
+				canEncrypt = canEncrypt || key.canEncrypt
+				expired = expired || key.expired
+				revoked = revoked || key.revoked
+			}
+		}
+		if canEncrypt {
+			continue
+		}
+		switch {
+		case revoked:
+			return fmt.Errorf("GPG encryption key %s has been revoked; move it to --retired-key to read and rewrite existing state", fingerprint)
+		case expired:
+			return fmt.Errorf("GPG encryption key %s has expired; renew it and share the updated public key with other writers, or move it to --retired-key to read and rewrite existing state", fingerprint)
+		default:
+			return fmt.Errorf("GPG key %s has no usable encryption key", fingerprint)
+		}
+	}
+	return nil
 }
 
 type localKey struct {
@@ -141,7 +207,7 @@ type localKey struct {
 }
 
 func (c *Client) localKeys(ctx context.Context) ([]localKey, error) {
-	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--with-subkey-fingerprint", "--with-secret", "--list-secret-keys"})
+	listing, _, err := c.run(ctx, nil, []string{"--with-colons", "--with-fingerprint", "--with-subkey-fingerprint", "--with-secret", "--list-secret-keys"}, 0)
 	if err != nil {
 		return nil, fmt.Errorf("list local GPG keys: %w", err)
 	}
@@ -229,11 +295,11 @@ func implicitKey(keys []localKey) (string, error) {
 
 // Decrypt requires integrity-protected public-key encryption and valid binary
 // signatures exclusively from authorized primary keys or their signing subkeys.
-// Recovery-only signers may bypass revocation, but no other signature checks.
+// Retired keys may bypass revocation, but no other signature checks.
 // Key expiry alone does not invalidate historical payloads.
 func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
 	authorized := c.AuthorizedKeys
-	if len(authorized) == 0 && len(c.AllowRevokedSigners) == 0 {
+	if len(authorized) == 0 && len(c.RetiredKeys) == 0 {
 		keys, err := c.localKeys(ctx)
 		if err != nil {
 			return nil, err
@@ -244,7 +310,7 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		}
 		authorized = []string{fingerprint}
 	}
-	output, status, err := c.run(ctx, bytes.NewReader(ciphertext), []string{"--max-output", strconv.Itoa(len(payloadPurpose) + MaxPayloadSize), "--decrypt", "--", "-"})
+	output, status, err := c.run(ctx, bytes.NewReader(ciphertext), []string{"--max-output", strconv.Itoa(len(payloadPurpose) + MaxPayloadSize), "--decrypt", "--", "-"}, min(len(ciphertext), len(payloadPurpose)+MaxPayloadSize))
 	if err != nil {
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
@@ -261,7 +327,7 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		return nil, errors.New("GPG did not confirm valid binary signatures from authorized keys")
 	}
 	for _, signature := range status.validSignatures {
-		if !slices.Contains(authorized, signature.primaryKey) && !slices.Contains(c.AllowRevokedSigners, signature.primaryKey) {
+		if !slices.Contains(authorized, signature.primaryKey) && !slices.Contains(c.RetiredKeys, signature.primaryKey) {
 			clear(output)
 			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signature.primaryKey)
 		}
@@ -288,7 +354,7 @@ func (c *Client) checkSignerRevocations(ctx context.Context, signatures []signat
 	for _, signature := range signatures {
 		args = append(args, signature.primaryKey)
 	}
-	listing, _, err := c.run(ctx, nil, args)
+	listing, _, err := c.run(ctx, nil, args, 0)
 	if err != nil {
 		return fmt.Errorf("check GPG signing key revocation: %w", err)
 	}
@@ -311,15 +377,19 @@ func (c *Client) checkSignerRevocations(ctx context.Context, signatures []signat
 			if !found {
 				return fmt.Errorf("GPG did not list signing key %s for revocation checks", fingerprint)
 			}
-			if revoked && !slices.Contains(c.AllowRevokedSigners, signature.primaryKey) {
-				return fmt.Errorf("GPG signing key %s has been revoked", fingerprint)
+			if revoked && !slices.Contains(c.RetiredKeys, signature.primaryKey) {
+				detail := ""
+				if fingerprint != signature.primaryKey {
+					detail = fmt.Sprintf(" (signing subkey %s)", fingerprint)
+				}
+				return fmt.Errorf("GPG signing key %s has been revoked%s; move its primary fingerprint to --retired-key for recovery reads", signature.primaryKey, detail)
 			}
 		}
 	}
 	return nil
 }
 
-func (c Client) run(ctx context.Context, input io.Reader, operation []string) ([]byte, operationStatus, error) {
+func (c Client) run(ctx context.Context, input io.Reader, operation []string, outputSize int) ([]byte, operationStatus, error) {
 	// GPG reads gpg.conf itself. Command-line settings keep its data on pipes
 	// and its prompts in pinentry.
 	args := []string{
@@ -333,7 +403,9 @@ func (c Client) run(ctx context.Context, input io.Reader, operation []string) ([
 	args = append(args, operation...)
 	cmd := exec.CommandContext(ctx, c.Executable, args...)
 	cmd.Stdin = input
-	var stdout, stderr bytes.Buffer
+	var stdout outputBuffer
+	stdout.buffer.Grow(outputSize)
+	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	// Bound waits for inherited pipes after GPG exits or the context is cancelled.
@@ -341,17 +413,40 @@ func (c Client) run(ctx context.Context, input io.Reader, operation []string) ([
 	err := cmd.Run()
 	status := readStatus(stderr.String())
 	if ctx.Err() != nil {
-		clear(stdout.Bytes())
+		clear(stdout.buffer.Bytes())
 		return nil, status, ctx.Err()
 	}
 	if err != nil {
-		clear(stdout.Bytes())
+		clear(stdout.buffer.Bytes())
 		if status.diagnostics != "" {
 			err = fmt.Errorf("%w: %s", err, status.diagnostics)
 		}
 		return nil, status, err
 	}
-	return stdout.Bytes(), status, nil
+	return stdout.buffer.Bytes(), status, nil
+}
+
+// GPG's partial packet framing can add one byte per 512 input bytes. Allow 4 KiB
+// per key for ordinary signature and recipient packets; these are sizing hints,
+// not limits on the packets GPG may produce.
+func packetOutputSizeHint(inputSize, keyCount int) int {
+	return inputSize + inputSize/512 + 4096*keyCount
+}
+
+// Reserve space for normal uncompressed payloads up front. Compressed input or
+// extra OpenPGP packets can still require growth; clear each old allocation so
+// clearing the final output does not leave earlier plaintext copies behind.
+type outputBuffer struct {
+	buffer bytes.Buffer
+}
+
+func (b *outputBuffer) Write(p []byte) (int, error) {
+	if b.buffer.Available() < len(p) {
+		previous := b.buffer.Bytes()
+		b.buffer.Grow(len(p))
+		clear(previous)
+	}
+	return b.buffer.Write(p)
 }
 
 type operationStatus struct {
@@ -384,6 +479,11 @@ func readStatus(stderr string) operationStatus {
 		line = strings.TrimSuffix(line, "\r")
 		message, machine := strings.CutPrefix(line, "[GNUPG:] ")
 		if !machine {
+			// GPG always logs a translated note about our intentional use of
+			// --no-literal. Preserve errors naming incompatible options too.
+			if strings.Contains(line, "--no-literal") && strings.Count(line, "--") == 1 {
+				continue
+			}
 			if line != "" {
 				diagnostics = append(diagnostics, line)
 			}

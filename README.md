@@ -16,7 +16,7 @@ signed version.
 - [Small team: shared state in S3](#small-team-shared-state-in-s3)
 - [Encrypting existing state](#encrypting-existing-state)
 - [Rewriting state after GPG policy changes](#rewriting-state-after-gpg-policy-changes)
-- [Recovering state signed by a revoked key](#recovering-state-signed-by-a-revoked-key)
+- [Recovering state after a key expires or is revoked](#recovering-state-after-a-key-expires-or-is-revoked)
 
 ## Quick start: your own key
 
@@ -189,7 +189,7 @@ not an AES key. Authorization always comes from the current configuration.
 
 For new state, run `tofu init` and `tofu apply`. For existing unencrypted state,
 follow the migration below first. A project already using this GPG method can
-add the policy provider directly. When adding recipients to existing encrypted
+add the policy provider directly. When adding members to existing encrypted
 state, have an existing member [force a state rewrite](#rewriting-state-after-gpg-policy-changes)
 before the new members try to read it. Afterwards, any authorized member with
 backend access can use `tofu plan` and `tofu apply` with their own key.
@@ -254,6 +254,8 @@ tofu apply -replace=terraform_data.gpg_rewrite
 Replacement changes the resource's ID, so OpenTofu uploads state signed and
 encrypted using the current policy. Use this command at each rewrite step below
 and wait for it to finish before proceeding. Run it in every affected workspace.
+The command also applies any other pending changes. Review the complete plan
+before approving each rewrite.
 
 ## Adding or removing team members
 
@@ -262,8 +264,10 @@ and wait for it to finish before proceeding. Run it in every affected workspace.
   member run `tofu apply -replace=terraform_data.gpg_rewrite`. The new member can
   read the state after that rewrite.
   The new member must also import and verify every existing member's public key
-  to verify signatures on the shared state.
-- **Remove a member:** first have a remaining member run
+  so the program can check signatures on the shared state.
+- **Remove a member:** if the departing member's key has expired or been revoked,
+  use the recovery procedure below instead. Otherwise, first have a remaining
+  member run
   `tofu apply -replace=terraform_data.gpg_rewrite` while the old fingerprint is
   still authorized. Then remove that fingerprint from the shared configuration
   and have the remaining member run
@@ -274,25 +278,23 @@ Use a remaining member's signing key for both removal rewrites. If several
 signing private keys are available, [select the remaining signer in GPG](#gpg-configuration)
 and remove any `local-user` entries for the departing member before the first
 rewrite.
-For a signer that has already been revoked, use the recovery procedure below.
 
 Previously saved plans, older state versions, and backups still require a private
 key that could read them and the public keys and authorization of their original
 signers. Removing a member does not remove their access to old copies they could
 already decrypt.
 
-## Recovering state signed by a revoked key
+## Recovering state after a key expires or is revoked
 
-If the current state's signer has been revoked and the team has independently
-verified that the state is correct, use `--allow-revoked-signer` as a temporary
-read-only recovery role. It accepts otherwise-valid signatures from the named
-primary key or its signing subkeys despite revocation. The key is never selected
-to sign new writes or added as an encryption recipient by this role. Integrity,
-signature validity, signature expiry, and every co-signer's authorization are
-still checked.
+To retire an expired or revoked member's key, use `--retired-key` as a temporary
+read-only role. It accepts valid historical signatures from the named primary
+key or its signing subkeys, including otherwise-valid signatures despite
+revocation. The key is never selected to sign new writes or added as an encryption
+recipient by this role. Integrity, signature validity, signature expiry, and every
+co-signer's authorization are still checked.
 
-1. Move the revoked primary fingerprint from `--authorized-key` to
-   `--allow-revoked-signer`. Keep the remaining valid members under
+1. Move the expired or revoked primary fingerprint from `--authorized-key` to
+   `--retired-key`. Keep the remaining valid members under
    `--authorized-key`. For example:
 
    ```hcl
@@ -300,34 +302,35 @@ still checked.
      "opentofu-gpg-encryption", "policy",
      "--authorized-key", "ALICE_VALID_FINGERPRINT",
      "--authorized-key", "BOB_VALID_FINGERPRINT",
-     "--allow-revoked-signer", "REVOKED_SIGNER_FINGERPRINT",
+     "--retired-key", "RETIRED_MEMBER_FINGERPRINT",
    ]
    ```
 
-   With [`examples/team`](examples/team), put the revoked fingerprint in
-   `gpg_allow_revoked_signers` and remove it from `gpg_authorized_keys`. A
+   With [`examples/team`](examples/team), put the retired fingerprint in
+   `gpg_retired_keys` and remove it from `gpg_authorized_keys`. A
    fingerprint cannot appear in both roles. An available recipient private key
    and every original signer's public key are still required for the read.
-2. Read and inspect the state, then have a remaining valid member run the command
-   below. Any configured `local-user` entries must refer only to active authorized
-   signers.
+2. Read and inspect the state, and independently verify that it is correct before
+   rewriting it. Then have a remaining valid member run the command below, reviewing
+   the complete plan before approval. Any configured `local-user` entries must refer
+   only to active authorized signers.
 
    ```sh
    tofu apply -replace=terraform_data.gpg_rewrite
    ```
 
-   This reads with the exception and writes a fresh signature and ciphertext for
-   the active authorized keys only.
-3. Remove `--allow-revoked-signer` (or clear `gpg_allow_revoked_signers`), then run:
+   This reads with retired-key authorization and writes a fresh signature and
+   ciphertext for the active authorized keys only.
+3. Remove `--retired-key` (or clear `gpg_retired_keys`), then run:
 
    ```sh
    tofu apply -replace=terraform_data.gpg_rewrite
    tofu state list
    ```
 
-   Normal reads now work without the recovery exception.
+   Normal reads now work without the retired-key authorization.
 
-While configured, the exception accepts any otherwise-valid payload signed by
+While configured, `--retired-key` accepts any otherwise-valid payload signed by
 that identity, so trust in the particular state must come from the team's
 independent verification. Recovery rewrites the current state only; older state
 versions, backups, and saved plans retain their original signatures. Recreate
@@ -338,18 +341,15 @@ saved plans for future use.
 Existing state and saved plans remain readable after a key expires. A read still
 needs a decryption private key and the public keys and authorization of every
 original signer. You do not need to extend expiry or import renewed public keys
-just to read historical data. Revoked keys are rejected unless explicitly allowed
-for [recovery](#recovering-state-signed-by-a-revoked-key); expired signatures are
-always rejected.
+just to read historical data. The program creates signatures that do not expire.
+Revoked keys are rejected unless explicitly allowed for
+[recovery](#recovering-state-after-a-key-expires-or-is-revoked).
 
 Expired keys cannot sign new state or plans, and GPG will not encrypt new payloads
-to expired recipient keys. To keep writing with the same authorized keys, renew
-them and share their updated public keys with the other writers. To retire an
-already expired key, move it to the read-only `--allow-revoked-signer` role and
-follow the [recovery rewrite procedure](#recovering-state-signed-by-a-revoked-key);
-this role also accepts valid historical signatures from keys that are not revoked.
-The owner can extend the primary key and its unexpired subkeys, for example by
-two years:
+to expired recipient keys. **One member's expired key blocks everyone's writes**
+while that key remains authorized. To keep writing with the same authorized keys,
+renew them and share their updated public keys with the other writers. The owner
+can extend the primary key and its unexpired subkeys, for example by two years:
 
 ```sh
 gpg --quick-set-expire YOUR_FULL_FINGERPRINT 2y
@@ -363,9 +363,18 @@ same, so the authorized-key list does not change. Keep the renewed private key
 backup up to date too.
 
 If a subkey has already expired, list its full fingerprint with
-`gpg --list-keys --with-subkey-fingerprint` and replace `"*"` in the second
-command with that subkey's fingerprint. Share and import the updated public key
-in the same way before using it for new writes.
+the following command:
+
+```sh
+gpg --list-keys --with-subkey-fingerprint --list-options show-unusable-subkeys
+```
+
+Replace `"*"` in the second renewal command with that subkey's fingerprint. Share
+and import the updated public key in the same way so every member can keep writing.
+
+Alternatively, to retire an already expired key, move it to the read-only
+`--retired-key` role and follow the
+[recovery rewrite procedure](#recovering-state-after-a-key-expires-or-is-revoked).
 
 ## Advanced settings
 
@@ -380,9 +389,9 @@ If several usable local private-key identities are available, both encryption an
 decryption require an explicit authorized-key list. Expired identities still
 count when selecting implicit authorization. The program never signs a probe or
 uses the message's own signatures to decide which identities to trust.
-If either key-role option is supplied, authorization comes only from the explicit
-lists. With `--allow-revoked-signer`, list active writers and recipients with
-`--authorized-key`; recovery-only configuration permits reads but no writes.
+If `--authorized-key` or `--retired-key` is supplied, authorization comes only from
+the explicit lists. With `--retired-key`, list active writers and recipients with
+`--authorized-key`; a configuration with only retired keys permits reads but no writes.
 
 ### GPG configuration
 
@@ -417,7 +426,7 @@ authorized-key list to control who can access the state; `default-recipient` and
 | Option | Default | Description |
 | --- | --- | --- |
 | `--authorized-key FPR` | Local key selection | Full primary-key fingerprint authorized to read and write; repeatable. |
-| `--allow-revoked-signer FPR` | None | Accept otherwise-valid signatures from this primary key despite revocation for recovery reads only; never adds a writer or encryption recipient; repeatable. |
+| `--retired-key FPR` | None | Full primary-key fingerprint accepted for reads only, including otherwise-valid signatures despite revocation; never adds a writer or encryption recipient; repeatable. |
 | `--gpg PATH` | `gpg` | GnuPG executable, resolved through PATH unless a path is supplied. |
 | `--homedir PATH` | GPG's usual home | Use a different GPG home directory; takes precedence over `GNUPGHOME`. |
 | `--timeout DURATION` | `45s` | Time limit for this command's request, for example `30s`. |
@@ -429,10 +438,10 @@ can use absolute executable paths if the tools are not on `PATH`. Paths containi
 spaces stay in a single element; use forward slashes or escaped backslashes in
 Windows HCL paths. The program does not expand `~` in paths.
 
-The policy provider shares `--authorized-key`, `--allow-revoked-signer`, `--gpg`,
-and `--homedir` settings.
+The policy provider passes its `--authorized-key`, `--retired-key`, `--gpg`,
+and `--homedir` settings to the method commands.
 When `keys` is supplied to a method, put these settings on the policy-provider
-command; the method rejects them rather than silently overriding them. Only
+command; the method rejects them rather than silently ignoring them. Only
 `--timeout` may be set on those method commands to change their
 cryptographic-operation budget.
 

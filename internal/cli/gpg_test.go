@@ -31,27 +31,33 @@ func TestGPGFailureDiagnostics(t *testing.T) {
 	secondKey := strings.Repeat("FEDCBA9876543210", 4)
 	failure := "gpg: échec de la vérification d'intégrité"
 	note := "gpg: session key could not be verified"
+	incompatible := "gpg: --textmode not allowed with --no-literal!"
 	for _, test := range []struct {
 		name string
 		log  string
 	}{
 		{"ordinary failure", ""},
+		{"no-literal note", "gpg: Note: --no-literal is not for normal use!\n"},
+		{"translated no-literal note", "gpg: Примечание: --no-literal используется в особых случаях!\n"},
 		{"log before status", "gpg: clé de session : '9:" + firstKey + "'\n[GNUPG:] SESSION_KEY 9:" + firstKey + "\n"},
 		{"log after status", "[GNUPG:] SESSION_KEY 9:" + firstKey + "\ngpg: сеансовый ключ: '9:" + firstKey + "'\n"},
 		{"bare key value", "[GNUPG:] SESSION_KEY 9:" + firstKey + "\ngpg: clé de session : '" + firstKey + "'\n"},
 		{"multiple session keys", "gpg: clé de session : '9:" + firstKey + "'\r\n[GNUPG:] SESSION_KEY 9:" + firstKey + "\r\n[GNUPG:] SESSION_KEY 9:" + secondKey + "\r\ngpg: сеансовый ключ: '9:" + secondKey + "'\r\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv(gpgTestStderr, test.log+failure+"\n"+note+"\n[GNUPG:] FAILURE decrypt 1\n")
+			t.Setenv(gpgTestStderr, test.log+failure+"\n"+note+"\n"+incompatible+"\n[GNUPG:] FAILURE decrypt 1\n")
 			var stdout, stderr bytes.Buffer
 			code := cli.Run(t.Context(), []string{"decrypt", "--gpg", executable, "--authorized-key", strings.Repeat("A", 40)}, strings.NewReader(`{"payload":"AQ=="}`), &stdout, &stderr, "dev")
 			if code != 1 {
 				t.Fatalf("exit code = %d, stderr = %q", code, &stderr)
 			}
-			for _, want := range []string{failure, note} {
+			for _, want := range []string{failure, note, incompatible} {
 				if !strings.Contains(stderr.String(), want) {
 					t.Fatalf("GPG diagnostic %q was lost: %s", want, &stderr)
 				}
+			}
+			if strings.Contains(stderr.String(), "normal use") || strings.Contains(stderr.String(), "особых случаях") {
+				t.Fatalf("GPG diagnostics retained the no-literal note: %s", &stderr)
 			}
 			for _, secret := range []string{firstKey, secondKey, "SESSION_KEY"} {
 				if strings.Contains(stderr.String(), secret) {
