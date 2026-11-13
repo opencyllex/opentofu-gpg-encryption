@@ -33,22 +33,6 @@ func Read(ctx context.Context, stdin io.Reader, limit int) ([]byte, error) {
 	}
 }
 
-// Decode accepts exactly one JSON value.
-func Decode(input []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(input))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		if err == nil {
-			err = errors.New("unexpected trailing JSON data")
-		}
-		return err
-	}
-	return nil
-}
-
 // Object decodes exact field names and rejects duplicates, including escaped
 // duplicates, rather than encoding/json's case-insensitive struct matching.
 func Object(input []byte, fields map[string]any) error {

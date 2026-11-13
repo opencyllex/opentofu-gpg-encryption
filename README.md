@@ -105,9 +105,8 @@ Enter your GPG passphrase when prompted. Continue using OpenTofu as usual: state
 is now stored encrypted, and saved plans created with `tofu plan -out=tfplan`
 are encrypted too.
 
-Read-only commands such as `tofu state list` only decrypt and verify; they never
-sign. Each state read needs one decryption (one confirmation on a hardware token).
-Initialization requires no private-key operations.
+Read-only commands such as `tofu state list` decrypt and verify signatures; they
+never sign.
 
 ## Small team: shared state in S3
 
@@ -194,7 +193,7 @@ state, have an existing member [force a state rewrite](#rewriting-state-after-gp
 before the new members try to read it. Afterwards, any authorized member with
 backend access can use `tofu plan` and `tofu apply` with their own key.
 
-See [`examples/team`](examples/team) for a complete example that keeps the
+See [`examples/team`](examples/team) for an encryption configuration that keeps the
 fingerprints in a `gpg_authorized_keys` variable. Supply its value
 through a variable file or `TF_VAR_gpg_authorized_keys` so it is available during
 `tofu init`.
@@ -219,9 +218,19 @@ state {
 }
 ```
 
-Run `tofu init` and `tofu apply` to write encrypted state. Then remove the
-`migration` method and restore the original `state` block with `enforced = true`.
-This makes OpenTofu require encrypted state on subsequent runs.
+Add the [rewrite resource](#rewriting-state-after-gpg-policy-changes) to your project
+if it is not already present, then run:
+
+```sh
+tofu init
+tofu apply -replace=terraform_data.gpg_rewrite
+```
+
+The resource change forces OpenTofu to upload encrypted state, even when there
+are no infrastructure changes. Review the complete plan before approving it.
+After a successful rewrite, remove the `migration` method and restore the original
+`state` block with `enforced = true`. This makes OpenTofu require encrypted state
+on subsequent runs.
 
 Create new saved plans after enabling encryption. Older plaintext state versions
 and backups remain unencrypted. See [OpenTofu's migration guide](https://opentofu.org/docs/language/state/encryption/#pre-existing-project)
@@ -346,10 +355,12 @@ Revoked keys are rejected unless explicitly allowed for
 [recovery](#recovering-state-after-a-key-expires-or-is-revoked).
 
 Expired keys cannot sign new state or plans, and GPG will not encrypt new payloads
-to expired recipient keys. **One member's expired key blocks everyone's writes**
-while that key remains authorized. To keep writing with the same authorized keys,
-renew them and share their updated public keys with the other writers. The owner
-can extend the primary key and its unexpired subkeys, for example by two years:
+to expired recipient keys. **One member without a usable encryption key blocks
+everyone's writes** while that member remains authorized. An expired subkey does
+not block writes if the same identity has another usable key for that operation.
+To keep writing with the same authorized keys, renew them and share their updated
+public keys with the other writers. The owner can extend the primary key and its
+unexpired subkeys, for example by two years:
 
 ```sh
 gpg --quick-set-expire YOUR_FULL_FINGERPRINT 2y
@@ -385,20 +396,21 @@ its full primary-key fingerprint to a policy-provider command, using the same
 syntax as the team example. Both method commands then receive that selection.
 You can also pass the same authorized-key options directly to both commands.
 
-If several usable local private-key identities are available, both encryption and
-decryption require an explicit authorized-key list. Expired identities still
-count when selecting implicit authorization. The program never signs a probe or
-uses the message's own signatures to decide which identities to trust.
+If several local private-key identities are available, both encryption and
+decryption require explicit authorization. Expired identities still count when
+selecting implicit authorization; invalid, revoked, and disabled identities do
+not. The program never signs a probe or uses the message's own signatures to
+decide which identities to trust.
 If `--authorized-key` or `--retired-key` is supplied, authorization comes only from
 the explicit lists. With `--retired-key`, list active writers and recipients with
 `--authorized-key`; a configuration with only retired keys permits reads but no writes.
 
 ### GPG configuration
 
-The program uses your usual GPG keyring and settings. If several authorized
-signing private keys are available, GPG chooses which one signs using its
-configuration.
-For example, you can select a default in `gpg.conf`:
+The program uses your usual GPG keyring and settings. It automatically selects a
+sole usable authorized signing key, overriding `default-key`. If several are
+eligible, GPG chooses using its configuration. For example, you can select a
+default in `gpg.conf`:
 
 ```text
 default-key YOUR_FULL_GPG_FINGERPRINT
@@ -408,12 +420,13 @@ GPG normally reads `~/.gnupg/gpg.conf` on Linux and macOS, or
 `%APPDATA%\gnupg\gpg.conf` on Windows. A custom GPG home directory can change this
 location.
 
-If you already use `local-user` settings, they override `default-key`. Every
-configured `local-user` must be authorized, and all selected signing private keys
-must be available when writing data. Reading requires a corresponding decryption
-private key and every original signer's public key and authorization. Use the
-authorized-key list to control who can access the state; `default-recipient` and
-`encrypt-to` settings do not add readers.
+`local-user` settings override `default-key` and are additive: they remain selected
+even when the program automatically selects a signing key. Every configured
+`local-user` must be authorized, and all selected signing private keys must be
+available when writing data. Reading requires a corresponding decryption private
+key and every original signer's public key and authorization. Use the authorized-key
+list to control who can access the state; `default-recipient` and `encrypt-to`
+settings do not add readers.
 
 ### Command-line options
 
@@ -425,7 +438,7 @@ authorized-key list to control who can access the state; `default-recipient` and
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--authorized-key FPR` | Local key selection | Full primary-key fingerprint authorized to read and write; repeatable. |
+| `--authorized-key FPR` | Sole local private-key identity | Full primary-key fingerprint authorized to read and write; repeatable. |
 | `--retired-key FPR` | None | Full primary-key fingerprint accepted for reads only, including otherwise-valid signatures despite revocation; never adds a writer or encryption recipient; repeatable. |
 | `--gpg PATH` | `gpg` | GnuPG executable, resolved through PATH unless a path is supplied. |
 | `--homedir PATH` | GPG's usual home | Use a different GPG home directory; takes precedence over `GNUPGHOME`. |
@@ -469,7 +482,7 @@ before starting OpenTofu. The program has no passphrase option; unlocking keys
 is handled through GPG.
 
 For source builds, implementation details, and contributor checks, see
-[`AGENTS.md`](AGENTS.md).
+[`AGENTS.md`](https://github.com/opencyllex/opentofu-gpg-encryption/blob/main/AGENTS.md).
 
 ## License
 

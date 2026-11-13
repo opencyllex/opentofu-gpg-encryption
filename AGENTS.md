@@ -189,11 +189,12 @@ the new signer through `default-key` or `local-user`; remove additive `local-use
 entries for retired signers before rewriting.
 
 The team example includes an empty `terraform_data.gpg_rewrite` resource.
-At every policy-change step, run `tofu apply -replace=terraform_data.gpg_rewrite`
-to persist newly signed and encrypted state; a no-change apply does not upload
-remote state. Review the complete plan before approval: replacement also applies
-other pending changes. If a departing key has expired or been revoked, move it to
-the read-only `--retired-key` list instead of attempting the normal first rewrite.
+Use it for plaintext-state migration and every policy-change step:
+`tofu apply -replace=terraform_data.gpg_rewrite` persists newly signed and encrypted
+state; a no-change apply does not upload remote state. Review the complete plan
+before approval: replacement also applies other pending changes. If a departing
+key has expired or been revoked, move it to the read-only `--retired-key` list
+instead of attempting the normal first rewrite.
 Inspect and independently verify the recovered state, rewrite with a valid signer
 and active recipients, remove the retired key, then repeat the replacement.
 Historical copies keep their original signatures.

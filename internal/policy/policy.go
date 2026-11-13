@@ -37,17 +37,6 @@ func (c Config) Encode() []byte {
 	return data
 }
 
-func Decode(data []byte) (Config, error) {
-	var config Config
-	if err := protocol.Decode(data, &config); err != nil {
-		return config, err
-	}
-	if err := config.Validate(); err != nil {
-		return config, err
-	}
-	return config, nil
-}
-
 // Validate normalizes public fingerprints and keeps active and retired keys
 // disjoint at the CLI and policy-input boundaries.
 func (c *Config) Validate() error {
@@ -56,7 +45,7 @@ func (c *Config) Validate() error {
 	}
 	for _, fingerprints := range [][]string{c.AuthorizedKeys, c.RetiredKeys} {
 		for i, value := range fingerprints {
-			fingerprint, err := Fingerprint(value)
+			fingerprint, err := normalizeFingerprint(value)
 			if err != nil {
 				return err
 			}
@@ -91,10 +80,10 @@ func (c *Config) UnmarshalJSON(input []byte) error {
 		return fmt.Errorf("unsupported GPG policy version %d", *version)
 	}
 	*c = Config{Version: *version, AuthorizedKeys: *authorized, RetiredKeys: *retired, GPG: *executable, HomeDir: *home}
-	return nil
+	return c.Validate()
 }
 
-func Fingerprint(value string) (string, error) {
+func normalizeFingerprint(value string) (string, error) {
 	if len(value) != 40 && len(value) != 64 {
 		return "", errors.New("key must be a full GPG primary-key fingerprint (40 or 64 hexadecimal characters)")
 	}

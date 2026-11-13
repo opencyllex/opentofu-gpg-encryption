@@ -34,7 +34,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 		return fmt.Errorf("read method request: %w", err)
 	}
 	var data request
-	err = protocol.Decode(input, &data)
+	err = json.Unmarshal(input, &data)
 	clear(input)
 	input = nil
 	if err != nil {
@@ -64,8 +64,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 		if len(encoded) > 1024*1024 {
 			return errors.New("GPG policy exceeds the 1 MiB limit")
 		}
-		config, err = policy.Decode(encoded)
-		if err != nil {
+		if err := json.Unmarshal(encoded, &config); err != nil {
 			return fmt.Errorf("parse GPG policy: %w", err)
 		}
 	}

@@ -43,7 +43,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, config policy.C
 		return fmt.Errorf("read policy metadata: %w", err)
 	}
 	var previous *metadata
-	if err := protocol.Decode(input, &previous); err != nil {
+	if err := json.Unmarshal(input, &previous); err != nil {
 		return fmt.Errorf("parse policy metadata: %w", err)
 	}
 	if previous != nil {

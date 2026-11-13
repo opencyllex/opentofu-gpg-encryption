@@ -1104,7 +1104,6 @@ func (h harness) startTrace(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gpg-operations.log")
 	clearTrace(t, path)
-	t.Setenv(traceGPG, h.gpg)
 	t.Setenv(traceLog, path)
 	return path
 }
@@ -1243,7 +1242,7 @@ func (h harness) migratePlaintext(t *testing.T, project string) {
 	if err := os.WriteFile(filepath.Join(project, "terraform.tfstate"), []byte(plaintext), 0600); err != nil {
 		t.Fatal(err)
 	}
-	h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+	h.tofuCommand(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color")
 	assertEncrypted(t, filepath.Join(project, "terraform.tfstate"))
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)

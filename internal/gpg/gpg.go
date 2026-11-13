@@ -332,7 +332,7 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signature.primaryKey)
 		}
 	}
-	if status.expiredSigner || status.revokedSigner {
+	if status.checkRevocations {
 		if err := c.checkSignerRevocations(ctx, status.validSignatures); err != nil {
 			clear(output)
 			return nil, err
@@ -460,8 +460,7 @@ type operationStatus struct {
 	createdSigners     []string
 	validSignatures    []signature
 	signatureFailed    bool
-	expiredSigner      bool
-	revokedSigner      bool
+	checkRevocations   bool
 	plaintexts         int
 	diagnostics        string
 }
@@ -525,14 +524,10 @@ func readStatus(stderr string) operationStatus {
 			}
 		case "BADSIG", "ERRSIG", "EXPSIG":
 			status.signatureFailed = true
-		case "REVKEYSIG", "KEYREVOKED":
-			// Resolve revocation per primary identity after verifying every
-			// signature, so an exception cannot exempt an unrelated co-signer.
-			status.revokedSigner = true
-		case "EXPKEYSIG":
-			// Key expiry alone is allowed, subject to VALIDSIG, authorization,
-			// and a separate revocation check on the public keys.
-			status.expiredSigner = true
+		case "EXPKEYSIG", "REVKEYSIG", "KEYREVOKED":
+			// Key expiry alone is allowed. Resolve revocation per primary
+			// identity so an exception cannot exempt an unrelated co-signer.
+			status.checkRevocations = true
 		case "PLAINTEXT":
 			status.plaintexts++
 		case "SESSION_KEY":

@@ -26,7 +26,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	flags := flag.NewFlagSet("opentofu-gpg-encryption", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var authorizedKeys, retiredKeys fingerprintFlags
-	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the sole usable local key)")
+	flags.Var(&authorizedKeys, "authorized-key", "Full GPG primary-key fingerprint authorized to read and write (repeatable; defaults to the sole local private-key identity)")
 	flags.Var(&retiredKeys, "retired-key", "Full GPG primary-key fingerprint accepted for reads only, including otherwise-valid signatures despite revocation; never signs new writes or adds an encryption recipient (repeatable)")
 	executable := flags.String("gpg", "gpg", "GnuPG executable name or path")
 	homeDir := flags.String("homedir", "", "GnuPG home directory (defaults to GPG's normal home resolution)")
@@ -66,11 +66,6 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stderr, "--timeout must be greater than zero.")
 		return 2
 	}
-	if strings.TrimSpace(*executable) == "" {
-		fmt.Fprintln(stderr, "--gpg must name a GnuPG executable.")
-		return 2
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	config := policy.Config{Version: policy.Version, GPG: *executable, HomeDir: *homeDir, AuthorizedKeys: authorizedKeys, RetiredKeys: retiredKeys}
@@ -102,10 +97,6 @@ type fingerprintFlags []string
 func (a *fingerprintFlags) String() string { return strings.Join(*a, ", ") }
 
 func (a *fingerprintFlags) Set(value string) error {
-	fingerprint, err := policy.Fingerprint(value)
-	if err != nil {
-		return err
-	}
-	*a = append(*a, fingerprint)
+	*a = append(*a, value)
 	return nil
 }
