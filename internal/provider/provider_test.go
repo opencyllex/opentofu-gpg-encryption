@@ -75,6 +75,30 @@ func TestPolicyAlwaysComesFromCurrentConfiguration(t *testing.T) {
 	checkPolicy(t, current.Keys.DecryptionKey, "B")
 }
 
+func TestRecoveryExceptionsAlwaysComeFromCurrentConfiguration(t *testing.T) {
+	config := configuration("A")
+	config.AllowRevokedSigners = []string{strings.Repeat("B", 40)}
+	initial := request(t, "null", config)
+	config.AllowRevokedSigners = []string{strings.Repeat("C", 40)}
+	current := request(t, string(initial.Meta), config)
+	for _, key := range [][]byte{current.Keys.EncryptionKey, current.Keys.DecryptionKey} {
+		var returned struct {
+			AllowRevokedSigners []string `json:"allow_revoked_signers"`
+		}
+		if err := json.Unmarshal(key, &returned); err != nil {
+			t.Fatal(err)
+		}
+		if len(returned.AllowRevokedSigners) != 1 || returned.AllowRevokedSigners[0] != strings.Repeat("C", 40) {
+			t.Fatalf("recovery authorization did not follow current configuration: %s", key)
+		}
+	}
+	if !bytes.Equal(initial.Meta, current.Meta) || string(initial.Meta) != `{"external_data":{"policy_version":1}}` {
+		t.Fatalf("recovery authorization changed the stored marker: %s", current.Meta)
+	}
+	removed := request(t, string(current.Meta), configuration("A"))
+	checkPolicy(t, removed.Keys.DecryptionKey, "A")
+}
+
 func TestInvalidMetadata(t *testing.T) {
 	for _, input := range []string{
 		"", "{", "[]", "null null", "{}", `{"external_data":null}`,
@@ -109,7 +133,7 @@ func TestMetadataSizeLimit(t *testing.T) {
 }
 
 func configuration(hex string) policy.Config {
-	return policy.Config{Version: 1, AuthorizedKeys: []string{strings.Repeat(hex, 40)}, GPG: "nonexistent-gpg-policy-must-not-run", HomeDir: "configured home"}
+	return policy.Config{Version: policy.Version, AuthorizedKeys: []string{strings.Repeat(hex, 40)}, GPG: "nonexistent-gpg-policy-must-not-run", HomeDir: "configured home"}
 }
 
 func checkPolicy(t *testing.T, data []byte, hex string) {
@@ -118,7 +142,7 @@ func checkPolicy(t *testing.T, data []byte, hex string) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatal(err)
 	}
-	if config.Version != 1 || len(config.AuthorizedKeys) != 1 || config.AuthorizedKeys[0] != strings.Repeat(hex, 40) || config.GPG != "nonexistent-gpg-policy-must-not-run" || config.HomeDir != "configured home" {
+	if config.Version != policy.Version || len(config.AuthorizedKeys) != 1 || len(config.AllowRevokedSigners) != 0 || config.AuthorizedKeys[0] != strings.Repeat(hex, 40) || config.GPG != "nonexistent-gpg-policy-must-not-run" || config.HomeDir != "configured home" {
 		t.Fatalf("unexpected policy: %+v", config)
 	}
 }

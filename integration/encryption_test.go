@@ -195,6 +195,35 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("version 1 policies remain compatible with current policy metadata", func(t *testing.T) {
+		legacy, err := json.Marshal(map[string]any{
+			"version": 1, "authorized_keys": []string{first}, "gpg": h.gpg, "homedir": firstHome,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ciphertext := h.method(t, "encrypt", firstHome, message, legacy)
+		if got := h.method(t, "decrypt", firstHome, ciphertext, legacy); !bytes.Equal(got, message) {
+			t.Fatal("a version 1 method policy no longer round-trips")
+		}
+		current := h.policy(t, firstHome, `{"external_data":{"policy_version":1}}`, "--authorized-key", first)
+		if got := h.method(t, "decrypt", firstHome, ciphertext, current.Keys.DecryptionKey); !bytes.Equal(got, message) {
+			t.Fatal("upgrading the public policy prevented reading existing ciphertext")
+		}
+	})
+
+	t.Run("the recovery role does not authorize writes even before revocation", func(t *testing.T) {
+		ciphertext := h.method(t, "encrypt", firstHome, message, nil)
+		if got := h.method(t, "decrypt", firstHome, ciphertext, nil, "--allow-revoked-signer", first); !bytes.Equal(got, message) {
+			t.Fatal("recovery-only authorization could not verify its signer")
+		}
+		log := h.startTrace(t)
+		h.reject(t, "encrypt", firstHome, message, nil, "no authorized GPG key has a usable signing secret key", "--allow-revoked-signer", first, "--gpg", h.wrapper)
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["encrypt"] != 0 {
+			t.Fatalf("recovery-only configuration performed a private write operation: %v", operations)
+		}
+	})
+
 	t.Run("sole authorized signer overrides default-key and ignores recipient defaults", func(t *testing.T) {
 		configure(t, master, "default-key "+first+"\ndefault-recipient "+first+"\ndefault-recipient-self\nencrypt-to "+first)
 		ciphertext := h.method(t, "encrypt", master, message, nil, "--authorized-key", strings.ToLower(second))
@@ -339,6 +368,7 @@ func TestIntegration(t *testing.T) {
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				h.reject(t, "decrypt", firstHome, test.data, nil, "GPG")
+				h.reject(t, "decrypt", firstHome, test.data, nil, "GPG", "--allow-revoked-signer", first)
 			})
 		}
 	})
@@ -348,30 +378,96 @@ func TestIntegration(t *testing.T) {
 		for _, plaintext := range [][]byte{message, append([]byte("Another-Protocol:v1\x00"), message...)} {
 			ciphertext := h.gpgCommand(t, master, plaintext, "--recipient", first, "--sign", "--encrypt")
 			h.reject(t, "decrypt", firstHome, ciphertext, nil, "not tagged as an OpenTofu payload")
+			h.reject(t, "decrypt", firstHome, ciphertext, nil, "not tagged as an OpenTofu payload", "--allow-revoked-signer", first)
 		}
 		ciphertext := h.method(t, "encrypt", firstHome, message, nil)
 		configure(t, firstHome, "skip-verify")
 		h.reject(t, "decrypt", firstHome, ciphertext, nil, "valid binary signatures")
+		h.reject(t, "decrypt", firstHome, ciphertext, nil, "valid binary signatures", "--allow-revoked-signer", first)
 	})
 
 	t.Run("reject expired and revoked signatures", func(t *testing.T) {
-		for _, name := range []string{"expired signature", "revoked signing subkey"} {
+		for _, test := range []struct {
+			name       string
+			expiredKey bool
+		}{
+			{"expired signature", false},
+			{"expired signature", true},
+			{"expired signature and revoked primary key", false},
+			{"expired signature and revoked primary key", true},
+			{"revoked primary key", false},
+			{"revoked primary key", true},
+			{"revoked signing subkey", false},
+			{"revoked signing subkey", true},
+		} {
+			name := test.name
+			if test.expiredKey {
+				name += " with expired key"
+			}
 			t.Run(name, func(t *testing.T) {
 				home := h.home(t)
 				created := time.Now().Add(-time.Hour)
+				if test.expiredKey {
+					created = time.Now().Add(-48 * time.Hour)
+				}
 				fingerprint := h.generateKey(t, home, "Signature Validity <validity@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
-				args := []string{"--recipient", fingerprint, "--sign", "--encrypt"}
-				if name == "expired signature" {
-					args = append([]string{"--faked-system-time", strconv.FormatInt(created.Add(time.Minute).Unix(), 10), "--default-sig-expire", "seconds=60"}, args...)
-				} else {
-					h.gpgCommand(t, home, nil, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-add-key", fingerprint, "rsa2048", "sign", "1d")
+				args := []string{"--faked-system-time", strconv.FormatInt(created.Add(time.Minute).Unix(), 10), "--recipient", fingerprint, "--sign", "--encrypt"}
+				expiredSignature := strings.HasPrefix(test.name, "expired signature")
+				if expiredSignature {
+					args = append([]string{"--default-sig-expire", "seconds=60"}, args...)
+				} else if test.name == "revoked signing subkey" {
+					h.gpgCommand(t, home, nil, "--faked-system-time", strconv.FormatInt(created.Unix(), 10), "--pinentry-mode", "loopback", "--passphrase", "", "--quick-add-key", fingerprint, "rsa2048", "sign", "1d")
 				}
 				ciphertext := h.gpgCommand(t, home, tagged(message), args...)
-				if name == "revoked signing subkey" {
-					h.gpgCommand(t, home, []byte("key 1\nrevkey\ny\n0\n\ny\nsave\n"), "--command-fd", "0", "--pinentry-mode", "loopback", "--passphrase", "", "--edit-key", fingerprint)
+				if test.name != "expired signature" {
+					commands := "revkey\ny\n0\n\ny\nsave\n"
+					if test.name == "revoked signing subkey" {
+						commands = "key 1\n" + commands
+					}
+					h.gpgCommand(t, home, []byte(commands), "--command-fd", "0", "--pinentry-mode", "loopback", "--passphrase", "", "--edit-key", fingerprint)
 				}
-				h.reject(t, "decrypt", home, ciphertext, nil, "GPG")
+				h.reject(t, "decrypt", home, ciphertext, nil, "GPG", "--authorized-key", fingerprint)
+				if expiredSignature {
+					h.reject(t, "decrypt", home, ciphertext, nil, "GPG", "--allow-revoked-signer", fingerprint)
+					return
+				}
+				options := []string{"--allow-revoked-signer", strings.ToLower(fingerprint)}
+				if got := h.method(t, "decrypt", home, ciphertext, nil, options...); !bytes.Equal(got, message) {
+					t.Fatal("explicit recovery authorization did not accept the revoked signer")
+				}
+				policy := h.policy(t, home, "null", options...)
+				if got := h.method(t, "decrypt", home, ciphertext, policy.Keys.DecryptionKey); !bytes.Equal(got, message) {
+					t.Fatal("the policy provider did not transport revoked-signer recovery authorization")
+				}
+				h.reject(t, "encrypt", home, message, policy.Keys.EncryptionKey, "no authorized GPG key has a usable signing secret key")
+				changed := bytes.Clone(ciphertext)
+				changed[len(changed)-1] ^= 1
+				h.reject(t, "decrypt", home, changed, policy.Keys.DecryptionKey, "GPG")
 			})
+		}
+	})
+
+	t.Run("revocation recovery verifies every co-signer", func(t *testing.T) {
+		home := h.home(t)
+		retired := h.generateKey(t, home, "Retired Co-signer <retired@example.invalid>")
+		other := h.generateKey(t, home, "Other Retired Co-signer <other-retired@example.invalid>")
+		current := h.generateKey(t, home, "Active Co-signer <active@example.invalid>")
+		configure(t, home, "local-user "+retired+"\nlocal-user "+other+"\nlocal-user "+current)
+		ciphertext := h.method(t, "encrypt", home, message, nil, "--authorized-key", retired, "--authorized-key", other, "--authorized-key", current)
+		for _, fingerprint := range []string{retired, other} {
+			h.gpgCommand(t, home, []byte("revkey\ny\n0\n\ny\nsave\n"), "--command-fd", "0", "--pinentry-mode", "loopback", "--passphrase", "", "--edit-key", fingerprint)
+		}
+		options := []string{"--authorized-key", current, "--allow-revoked-signer", retired}
+		h.reject(t, "decrypt", home, ciphertext, nil, "has been revoked", append(slices.Clone(options), "--authorized-key", other)...)
+		h.reject(t, "decrypt", home, ciphertext, nil, "signature from key "+other+" is not authorized", options...)
+		options = append(options, "--allow-revoked-signer", other)
+		if got := h.method(t, "decrypt", home, ciphertext, nil, options...); !bytes.Equal(got, message) {
+			t.Fatal("explicitly allowing every revoked co-signer did not recover the payload")
+		}
+		configure(t, home, "")
+		rewritten := h.method(t, "encrypt", home, message, nil, options...)
+		if got := h.method(t, "decrypt", home, rewritten, nil, "--authorized-key", current); !bytes.Equal(got, message) {
+			t.Fatal("a recovery-only signer was used to sign the rewritten payload")
 		}
 	})
 
@@ -387,7 +483,7 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("expired keys explain renewal and recover with updated public keys", func(t *testing.T) {
+	t.Run("expired keys allow historical reads but cannot write", func(t *testing.T) {
 		home := h.home(t)
 		created := time.Now().Add(-48 * time.Hour)
 		fingerprint := h.generateKey(t, home, "Expired Key <expired@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
@@ -396,12 +492,82 @@ func TestIntegration(t *testing.T) {
 		configure(t, home, "")
 		for _, options := range [][]string{nil, {"--authorized-key", fingerprint}} {
 			h.reject(t, "encrypt", home, message, nil, "key has expired", options...)
-			h.reject(t, "decrypt", home, ciphertext, nil, "key has expired", options...)
+			if got := h.method(t, "decrypt", home, ciphertext, nil, options...); !bytes.Equal(got, message) {
+				t.Fatal("key expiry prevented reading historical state")
+			}
+			policy := h.policy(t, home, "null", options...)
+			h.reject(t, "encrypt", home, message, policy.Keys.EncryptionKey, "key has expired")
+			if got := h.method(t, "decrypt", home, ciphertext, policy.Keys.DecryptionKey); !bytes.Equal(got, message) {
+				t.Fatal("key expiry prevented reading historical state with a policy provider")
+			}
 		}
 		h.gpgCommand(t, home, nil, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-set-expire", fingerprint, "2y")
-		if got := h.method(t, "decrypt", home, ciphertext, nil); !bytes.Equal(got, message) {
-			t.Fatal("renewing the key did not restore access to historical state")
+		rewritten := h.method(t, "encrypt", home, message, nil)
+		if got := h.method(t, "decrypt", home, rewritten, nil); !bytes.Equal(got, message) {
+			t.Fatal("renewing the key did not restore writes")
 		}
+	})
+
+	t.Run("expired signing subkeys allow historical reads", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		fakeTime := strconv.FormatInt(created.Unix(), 10)
+		fingerprint := h.generateKey(t, home, "Expired Signing Subkey <subkey-expiry@example.invalid>", "--faked-system-time", fakeTime)
+		h.gpgCommand(t, home, nil, "--faked-system-time", fakeTime, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-set-expire", fingerprint, "2y")
+		h.gpgCommand(t, home, nil, "--faked-system-time", fakeTime, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-add-key", fingerprint, "rsa2048", "sign", "1d")
+		configure(t, home, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		ciphertext := h.method(t, "encrypt", home, message, nil)
+		configure(t, home, "")
+		if status := h.decryptionStatus(t, home, ciphertext); !bytes.Contains(status, []byte("[GNUPG:] EXPKEYSIG ")) {
+			t.Fatal("the historical fixture was not signed by an expired subkey")
+		}
+		for _, options := range [][]string{nil, {"--authorized-key", fingerprint}} {
+			if got := h.method(t, "decrypt", home, ciphertext, nil, options...); !bytes.Equal(got, message) {
+				t.Fatal("signing subkey expiry prevented reading historical state")
+			}
+		}
+	})
+
+	t.Run("expired co-signers must remain authorized", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		fakeTime := strconv.FormatInt(created.Unix(), 10)
+		expired := h.generateKey(t, home, "Expired Co-signer <expired-cosigner@example.invalid>", "--faked-system-time", fakeTime)
+		current := h.generateKey(t, home, "Current Co-signer <current-cosigner@example.invalid>", "--faked-system-time", fakeTime)
+		h.gpgCommand(t, home, nil, "--faked-system-time", fakeTime, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-set-expire", current, "2y")
+		configure(t, home, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10)+"\nlocal-user "+expired+"\nlocal-user "+current)
+		authorized := []string{"--authorized-key", expired, "--authorized-key", current}
+		ciphertext := h.method(t, "encrypt", home, message, nil, authorized...)
+		configure(t, home, "")
+		readHome := h.home(t)
+		h.gpgCommand(t, readHome, h.gpgCommand(t, home, nil, "--export-secret-keys", current), "--import")
+		h.gpgCommand(t, readHome, h.gpgCommand(t, home, nil, "--export", expired), "--import")
+		if got := h.method(t, "decrypt", readHome, ciphertext, nil, authorized...); !bytes.Equal(got, message) {
+			t.Fatal("an expired authorized co-signer prevented reading historical state")
+		}
+		for _, options := range [][]string{nil, {"--authorized-key", current}} {
+			h.reject(t, "decrypt", readHome, ciphertext, nil, "signature from key "+expired+" is not authorized", options...)
+		}
+	})
+
+	t.Run("expired identities still require explicit authorization with multiple local keys", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		expired := h.generateKey(t, home, "Expired Identity <expired-identity@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
+		configure(t, home, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		ciphertext := h.method(t, "encrypt", home, message, nil)
+		configure(t, home, "")
+		current := h.generateKey(t, home, "Current Identity <current-identity@example.invalid>")
+		log := h.startTrace(t)
+		h.reject(t, "decrypt", home, ciphertext, nil, "multiple local GPG keys", "--gpg", h.wrapper)
+		h.reject(t, "encrypt", home, message, nil, "multiple local GPG keys", "--gpg", h.wrapper)
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 || operations["encrypt"] != 0 {
+			t.Fatalf("ambiguous authorization performed a private operation: %v", operations)
+		}
+		if got := h.method(t, "decrypt", home, ciphertext, nil, "--authorized-key", expired); !bytes.Equal(got, message) {
+			t.Fatal("explicit authorization did not recover historical state")
+		}
+		h.method(t, "encrypt", home, message, nil, "--authorized-key", current)
 	})
 
 	t.Run("integrity failures cannot leak session keys", func(t *testing.T) {
@@ -413,6 +579,7 @@ func TestIntegration(t *testing.T) {
 		}
 		ciphertext[len(ciphertext)-1] ^= 1
 		stderr := h.reject(t, "decrypt", firstHome, ciphertext, nil, "GPG")
+		h.reject(t, "decrypt", firstHome, ciphertext, nil, "GPG", "--allow-revoked-signer", first)
 		if strings.Contains(stderr, "SESSION_KEY") || strings.Contains(stderr, "session key") {
 			t.Fatalf("diagnostics exposed a session key: %s", stderr)
 		}
@@ -464,6 +631,34 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("timeout", func(t *testing.T) {
 		h.reject(t, "encrypt", firstHome, message, nil, "deadline exceeded", "--timeout", "1ns")
+	})
+
+	t.Run("OpenTofu reads historical state and saved plans after key expiry", func(t *testing.T) {
+		home := h.home(t)
+		created := time.Now().Add(-48 * time.Hour)
+		h.generateKey(t, home, "Historical State <historical@example.invalid>", "--faked-system-time", strconv.FormatInt(created.Unix(), 10))
+		configure(t, home, "faked-system-time "+strconv.FormatInt(created.Add(time.Hour).Unix(), 10))
+		project := t.TempDir()
+		h.writeProject(t, project, home, false)
+		h.tofuCommand(t, project, "init", "-input=false", "-no-color")
+		h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+		h.tofuCommand(t, project, "plan", "-input=false", "-no-color", "-out=saved.tfplan")
+		assertEncrypted(t, filepath.Join(project, "terraform.tfstate"))
+		assertEncrypted(t, filepath.Join(project, "saved.tfplan"))
+		configure(t, home, "")
+		log := h.startTrace(t)
+		if output := h.tofuCommand(t, project, "output", "-raw", "secret"); output != string(message) {
+			t.Fatal("key expiry prevented OpenTofu from reading historical state")
+		}
+		if output := h.tofuCommand(t, project, "show", "-json", "saved.tfplan"); !strings.Contains(output, string(message)) {
+			t.Fatal("key expiry prevented OpenTofu from reading a historical saved plan")
+		}
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["encrypt"] != 0 {
+			t.Fatalf("historical reads performed signing or encryption: %v", operations)
+		}
+		if output, err := h.runTofu(t, project, "plan", "-input=false", "-no-color", "-out=expired.tfplan"); err == nil || !strings.Contains(output, "key has expired") {
+			t.Fatalf("OpenTofu wrote a new plan with an expired key: err=%v\n%s", err, output)
+		}
 	})
 
 	for _, usePolicy := range []bool{false, true} {
@@ -530,9 +725,9 @@ func TestIntegration(t *testing.T) {
 			h.tofuCommand(t, project, "apply", "-input=false", "-no-color", "saved.tfplan")
 			if usePolicy {
 				h.writeProject(t, project, secondHome, true, first, second)
-				h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+				h.tofuCommand(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color")
 				h.writeProject(t, project, secondHome, true, second)
-				h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+				h.tofuCommand(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color")
 				if output := h.tofuCommand(t, project, "output", "-raw", "secret"); output != string(message) {
 					t.Fatal("rotated state could not be read by the remaining member")
 				}
@@ -553,12 +748,14 @@ func TestIntegration(t *testing.T) {
 		if output := h.tofuCommand(t, project, "state", "list"); !strings.Contains(output, "terraform_data.example") {
 			t.Fatal("adding a policy provider prevented reading existing state")
 		}
-		h.tofuCommand(t, project, "apply", "-auto-approve", "-input=false", "-no-color")
+		h.tofuCommand(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color")
 		h.writeProject(t, project, secondHome, true, first, second)
 		if output := h.tofuCommand(t, project, "output", "-raw", "secret"); output != string(message) {
 			t.Fatal("the added member could not read state after the policy migration")
 		}
 	})
+
+	t.Run("OpenTofu remote GPG policy changes", h.testRemotePolicyChanges)
 
 	t.Run("team example requires a nonempty authorized-key list", func(t *testing.T) {
 		configuration, err := os.ReadFile(filepath.Join("..", "examples", "team", "main.tf"))
@@ -840,9 +1037,17 @@ func traceOperations(t *testing.T, path string) map[string]int {
 
 func (h harness) writeProject(t *testing.T, dir, home string, usePolicy bool, authorizedKeys ...string) {
 	t.Helper()
+	h.writeProjectConfig(t, dir, home, usePolicy, authorizedKeys, nil)
+}
+
+func (h harness) writeProjectConfig(t *testing.T, dir, home string, usePolicy bool, authorizedKeys, allowRevokedSigners []string) {
+	t.Helper()
 	options := []string{"--gpg", h.wrapper, "--homedir", home}
 	for _, fingerprint := range authorizedKeys {
 		options = append(options, "--authorized-key", fingerprint)
+	}
+	for _, fingerprint := range allowRevokedSigners {
+		options = append(options, "--allow-revoked-signer", fingerprint)
 	}
 	command := func(operation string, options []string) string {
 		encoded, err := json.Marshal(append([]string{h.binary, operation}, options...))
@@ -879,6 +1084,7 @@ func (h harness) writeProject(t *testing.T, dir, home string, usePolicy bool, au
 resource "terraform_data" "example" {
   input = "integration-secret-sentinel"
 }
+resource "terraform_data" "gpg_rewrite" {}
 output "secret" {
   value     = terraform_data.example.output
   sensitive = true

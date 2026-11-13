@@ -11,6 +11,9 @@ import (
 	"github.com/opencyllex/opentofu-gpg-encryption/internal/protocol"
 )
 
+// The stored marker has not changed with the public policy's v2 extension.
+const metadataVersion = 1
+
 type metadata struct {
 	ExternalData *marker `json:"external_data"`
 }
@@ -47,14 +50,14 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, config policy.C
 		if previous.ExternalData == nil {
 			return errors.New("policy metadata is missing external_data")
 		}
-		if previous.ExternalData.PolicyVersion != policy.Version {
+		if previous.ExternalData.PolicyVersion != metadataVersion {
 			return fmt.Errorf("unsupported policy metadata version %d", previous.ExternalData.PolicyVersion)
 		}
 	}
 	data := config.Encode()
 	result := response{
 		Keys: keys{EncryptionKey: data, DecryptionKey: data},
-		Meta: metadata{ExternalData: &marker{PolicyVersion: policy.Version}},
+		Meta: metadata{ExternalData: &marker{PolicyVersion: metadataVersion}},
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return fmt.Errorf("write policy response: %w", err)

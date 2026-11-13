@@ -20,13 +20,14 @@ const (
 	MaxPayloadSize = 256 * 1024 * 1024
 )
 
-var errExpiredKey = errors.New("GPG key has expired; its owner must extend the expiry with gpg --quick-set-expire and re-share the updated public key with every reader")
+var errExpiredKey = errors.New("GPG signing key has expired; renew it with gpg --quick-set-expire and share the updated public key before writing new state or plans")
 
 // Client invokes GnuPG with its normal configuration, keyring, and agent.
 type Client struct {
-	Executable     string
-	HomeDir        string
-	AuthorizedKeys []string
+	Executable          string
+	HomeDir             string
+	AuthorizedKeys      []string
+	AllowRevokedSigners []string
 }
 
 // Encrypt requires a sole usable local identity when authorization is implicit.
@@ -97,7 +98,7 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) 
 
 func (c *Client) selectSigner(keys []localKey) (string, error) {
 	authorized := c.AuthorizedKeys
-	if len(authorized) == 0 {
+	if len(authorized) == 0 && len(c.AllowRevokedSigners) == 0 {
 		fingerprint, err := implicitKey(keys)
 		if err != nil {
 			return "", err
@@ -119,7 +120,7 @@ func (c *Client) selectSigner(keys []localKey) (string, error) {
 		if expired {
 			return "", errExpiredKey
 		}
-		if len(c.AuthorizedKeys) != 0 {
+		if len(c.AuthorizedKeys) != 0 || len(c.AllowRevokedSigners) != 0 {
 			return "", errors.New("no authorized GPG key has a usable signing secret key")
 		}
 		return "", errors.New("no usable GPG signing secret key is available")
@@ -151,7 +152,7 @@ func (c *Client) localKeys(ctx context.Context) ([]localKey, error) {
 		if !secret {
 			return
 		}
-		key.canSign = key.usable && signingCap && signingSecret
+		key.canSign = key.usable && !key.expired && signingCap && signingSecret
 		index := slices.IndexFunc(keys, func(existing localKey) bool { return existing.fingerprint == key.fingerprint })
 		if index == -1 {
 			keys = append(keys, key)
@@ -178,7 +179,7 @@ func (c *Client) localKeys(ctx context.Context) ([]localKey, error) {
 			if len(fields) >= 15 {
 				// Uppercase S describes usable signing capability across the
 				// whole key; lowercase s describes this particular key packet.
-				key.usable = !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ired")
+				key.usable = !strings.Contains(fields[11], "D") && !strings.ContainsAny(fields[1], "ird")
 				key.expired = fields[1] == "e"
 				signingCap = strings.Contains(fields[11], "S")
 				secret = fields[14] != "" && fields[14] != "#"
@@ -207,20 +208,17 @@ func (c *Client) localKeys(ctx context.Context) ([]localKey, error) {
 	return keys, nil
 }
 
+// Expiry does not change implicit authorization: an expired identity can still
+// authenticate historical payloads, but cannot sign new ones.
 func implicitKey(keys []localKey) (string, error) {
 	var candidates []string
-	var expired bool
 	for _, key := range keys {
 		if key.usable {
 			candidates = append(candidates, key.fingerprint)
 		}
-		expired = expired || key.expired
 	}
 	switch len(candidates) {
 	case 0:
-		if expired {
-			return "", errExpiredKey
-		}
 		return "", errors.New("no usable local GPG private key is available; import your private key or connect its hardware token")
 	case 1:
 		return candidates[0], nil
@@ -231,9 +229,11 @@ func implicitKey(keys []localKey) (string, error) {
 
 // Decrypt requires integrity-protected public-key encryption and valid binary
 // signatures exclusively from authorized primary keys or their signing subkeys.
+// Recovery-only signers may bypass revocation, but no other signature checks.
+// Key expiry alone does not invalidate historical payloads.
 func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
 	authorized := c.AuthorizedKeys
-	if len(authorized) == 0 {
+	if len(authorized) == 0 && len(c.AllowRevokedSigners) == 0 {
 		keys, err := c.localKeys(ctx)
 		if err != nil {
 			return nil, err
@@ -245,10 +245,6 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		authorized = []string{fingerprint}
 	}
 	output, status, err := c.run(ctx, bytes.NewReader(ciphertext), []string{"--max-output", strconv.Itoa(len(payloadPurpose) + MaxPayloadSize), "--decrypt", "--", "-"})
-	if status.keyExpired {
-		clear(output)
-		return nil, errExpiredKey
-	}
 	if err != nil {
 		return nil, fmt.Errorf("GPG decryption failed: %w", err)
 	}
@@ -260,14 +256,20 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		clear(output)
 		return nil, errors.New("GPG did not confirm AES-256 payload encryption")
 	}
-	if status.plaintexts != 1 || status.signatureFailed || len(status.validSigners) == 0 {
+	if status.plaintexts != 1 || status.signatureFailed || len(status.validSignatures) == 0 {
 		clear(output)
 		return nil, errors.New("GPG did not confirm valid binary signatures from authorized keys")
 	}
-	for _, signer := range status.validSigners {
-		if !slices.Contains(authorized, signer) {
+	for _, signature := range status.validSignatures {
+		if !slices.Contains(authorized, signature.primaryKey) && !slices.Contains(c.AllowRevokedSigners, signature.primaryKey) {
 			clear(output)
-			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signer)
+			return nil, fmt.Errorf("GPG signature from key %s is not authorized", signature.primaryKey)
+		}
+	}
+	if status.expiredSigner || status.revokedSigner {
+		if err := c.checkSignerRevocations(ctx, status.validSignatures); err != nil {
+			clear(output)
+			return nil, err
 		}
 	}
 	payload, ok := bytes.CutPrefix(output, []byte(payloadPurpose))
@@ -276,6 +278,45 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 		return nil, errors.New("GPG-signed message is not tagged as an OpenTofu payload")
 	}
 	return payload, nil
+}
+
+func (c *Client) checkSignerRevocations(ctx context.Context, signatures []signature) error {
+	// GPG can report EXPKEYSIG instead of REVKEYSIG for an expired, revoked
+	// signing key. Its public-key listing still reports revocation, including
+	// revocation of an individual signing subkey.
+	args := []string{"--with-colons", "--with-fingerprint", "--with-subkey-fingerprint", "--list-keys"}
+	for _, signature := range signatures {
+		args = append(args, signature.primaryKey)
+	}
+	listing, _, err := c.run(ctx, nil, args)
+	if err != nil {
+		return fmt.Errorf("check GPG signing key revocation: %w", err)
+	}
+	var revoked bool
+	listed := make(map[string]bool)
+	for line := range strings.SplitSeq(string(listing), "\n") {
+		fields := strings.Split(line, ":")
+		switch fields[0] {
+		case "pub", "sub":
+			revoked = len(fields) >= 2 && fields[1] == "r"
+		case "fpr":
+			if len(fields) >= 10 {
+				listed[fields[9]] = listed[fields[9]] || revoked
+			}
+		}
+	}
+	for _, signature := range signatures {
+		for _, fingerprint := range []string{signature.primaryKey, signature.signingKey} {
+			revoked, found := listed[fingerprint]
+			if !found {
+				return fmt.Errorf("GPG did not list signing key %s for revocation checks", fingerprint)
+			}
+			if revoked && !slices.Contains(c.AllowRevokedSigners, signature.primaryKey) {
+				return fmt.Errorf("GPG signing key %s has been revoked", fingerprint)
+			}
+		}
+	}
+	return nil
 }
 
 func (c Client) run(ctx context.Context, input io.Reader, operation []string) ([]byte, operationStatus, error) {
@@ -322,11 +363,17 @@ type operationStatus struct {
 	integrityVerified  bool
 	integrityFailed    bool
 	createdSigners     []string
-	validSigners       []string
+	validSignatures    []signature
 	signatureFailed    bool
-	keyExpired         bool
+	expiredSigner      bool
+	revokedSigner      bool
 	plaintexts         int
 	diagnostics        string
+}
+
+type signature struct {
+	primaryKey string
+	signingKey string
 }
 
 func readStatus(stderr string) operationStatus {
@@ -372,15 +419,20 @@ func readStatus(stderr string) operationStatus {
 			// signing subkey made the signature. Only binary signatures bind
 			// every byte; text signatures canonicalize line endings.
 			if len(fields) >= 11 && fields[9] == "00" {
-				status.validSigners = append(status.validSigners, fields[10])
+				status.validSignatures = append(status.validSignatures, signature{primaryKey: fields[10], signingKey: fields[1]})
 			} else {
 				status.signatureFailed = true
 			}
-		case "BADSIG", "ERRSIG", "EXPSIG", "REVKEYSIG":
+		case "BADSIG", "ERRSIG", "EXPSIG":
 			status.signatureFailed = true
+		case "REVKEYSIG", "KEYREVOKED":
+			// Resolve revocation per primary identity after verifying every
+			// signature, so an exception cannot exempt an unrelated co-signer.
+			status.revokedSigner = true
 		case "EXPKEYSIG":
-			status.keyExpired = true
-			status.signatureFailed = true
+			// Key expiry alone is allowed, subject to VALIDSIG, authorization,
+			// and a separate revocation check on the public keys.
+			status.expiredSigner = true
 		case "PLAINTEXT":
 			status.plaintexts++
 		case "SESSION_KEY":

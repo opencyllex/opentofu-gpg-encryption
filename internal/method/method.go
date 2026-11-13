@@ -69,7 +69,7 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, operation strin
 			return fmt.Errorf("parse GPG policy: %w", err)
 		}
 	}
-	client := gpg.Client{Executable: config.GPG, HomeDir: config.HomeDir, AuthorizedKeys: config.AuthorizedKeys}
+	client := gpg.Client{Executable: config.GPG, HomeDir: config.HomeDir, AuthorizedKeys: config.AuthorizedKeys, AllowRevokedSigners: config.AllowRevokedSigners}
 	var output []byte
 	if operation == "encrypt" {
 		output, err = client.Encrypt(ctx, payload)

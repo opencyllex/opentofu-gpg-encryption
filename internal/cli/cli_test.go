@@ -44,6 +44,14 @@ func TestInvalidArguments(t *testing.T) {
 		{"policy", "--authorized-key", strings.Repeat("G", 40)},
 		{"policy", "--authorized-key", "0x" + strings.Repeat("A", 40)},
 		{"policy", "--authorized-key", strings.Repeat("A", 40) + "!"},
+		{"policy", "--allow-revoked-signer"},
+		{"policy", "--allow-revoked-signer", ""},
+		{"policy", "--allow-revoked-signer", "person@example.invalid"},
+		{"policy", "--allow-revoked-signer", "0123456789ABCDEF"},
+		{"policy", "--allow-revoked-signer", strings.Repeat("G", 40)},
+		{"policy", "--allow-revoked-signer", "0x" + strings.Repeat("A", 40)},
+		{"policy", "--allow-revoked-signer", strings.Repeat("A", 40) + "!"},
+		{"policy", "--authorized-key", strings.Repeat("A", 40), "--allow-revoked-signer", strings.Repeat("a", 40)},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -128,6 +136,16 @@ func TestInvalidPolicies(t *testing.T) {
 		`{"version":1,"gpg":"must-not-run-gpg","authorized_keys":["person@example.invalid"],"homedir":""}`,
 		`{"version":1,"gpg":"must-not-run-gpg","unknown":true}`,
 		`{"version":1,"version":1,"gpg":"must-not-run-gpg"}`,
+		`{"version":3,"authorized_keys":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":1,"authorized_keys":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":1,"authorized_keys":[],"allow_revoked_signers":null,"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":null,"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":"not-an-array","gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":["person@example.invalid"],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"Allow_Revoked_Signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":[],"allow_revoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":[],"allow_revoked_signers":[],"allow_\u0072evoked_signers":[],"gpg":"must-not-run-gpg","homedir":""}`,
+		`{"version":2,"authorized_keys":["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"allow_revoked_signers":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"gpg":"must-not-run-gpg","homedir":""}`,
 	} {
 		input, err := json.Marshal(map[string]string{"payload": "AQ==", "key": base64.StdEncoding.EncodeToString([]byte(encoded))})
 		if err != nil {
@@ -150,6 +168,7 @@ func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
 	for _, operation := range []string{"encrypt", "decrypt"} {
 		for _, options := range [][]string{
 			{"--authorized-key", strings.Repeat("A", 40)},
+			{"--allow-revoked-signer", strings.Repeat("B", 40)},
 			{"--gpg", "gpg"},
 			{"--homedir", ""},
 		} {
@@ -161,5 +180,44 @@ func TestMethodRejectsFlagsWithPolicy(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRecoveryPolicyConfiguration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(t.Context(), []string{
+		"policy", "--gpg", "nonexistent-gpg-policy-must-not-run",
+		"--authorized-key", strings.Repeat("a", 40),
+		"--allow-revoked-signer", strings.Repeat("b", 40),
+		"--allow-revoked-signer", strings.Repeat("c", 64),
+	}, strings.NewReader(`{"external_data":{"policy_version":1}}`), &stdout, &stderr, "dev")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, &stderr)
+	}
+	_, body, _ := bytes.Cut(stdout.Bytes(), []byte("\n"))
+	var response struct {
+		Keys struct {
+			EncryptionKey []byte `json:"encryption_key"`
+			DecryptionKey []byte `json:"decryption_key"`
+		} `json:"keys"`
+		Meta json.RawMessage `json:"meta"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		Version             int      `json:"version"`
+		AuthorizedKeys      []string `json:"authorized_keys"`
+		AllowRevokedSigners []string `json:"allow_revoked_signers"`
+	}
+	if err := json.Unmarshal(response.Keys.DecryptionKey, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.Version != 2 || len(policy.AuthorizedKeys) != 1 || policy.AuthorizedKeys[0] != strings.Repeat("A", 40) ||
+		len(policy.AllowRevokedSigners) != 2 || policy.AllowRevokedSigners[0] != strings.Repeat("B", 40) || policy.AllowRevokedSigners[1] != strings.Repeat("C", 64) {
+		t.Fatalf("unexpected recovery policy: %+v", policy)
+	}
+	if !bytes.Equal(response.Keys.EncryptionKey, response.Keys.DecryptionKey) || string(response.Meta) != `{"external_data":{"policy_version":1}}` {
+		t.Fatalf("unexpected policy keys or stored metadata: %s", body)
 	}
 }
