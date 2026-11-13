@@ -141,9 +141,14 @@ func encryptionArgs(authorized []string) []string {
 // own trust model without using private keys. Consult listings only to explain
 // failures: GPG 2.2 can report expiry with an unspecified INV_RECP reason.
 func (c *Client) checkRecipients(ctx context.Context, authorized []string) error {
-	_, encryptErr := c.runTo(ctx, nil, encryptionArgs(authorized), io.Discard)
+	status, encryptErr := c.runTo(ctx, nil, encryptionArgs(authorized), io.Discard)
 	if encryptErr == nil {
 		return nil
+	}
+	for _, fingerprint := range authorized {
+		if status.invalidRecipients[fingerprint] == "10" {
+			return fmt.Errorf("public key %s is not verified in your GPG keyring; confirm its fingerprint with its owner, then run gpg --quick-lsign-key %s", fingerprint, fingerprint)
+		}
 	}
 	// Listing the whole keyring avoids version-dependent exit codes when a
 	// fingerprint is missing from a list of requested keys.
@@ -478,6 +483,7 @@ type operationStatus struct {
 	integrityProtected bool
 	integrityVerified  bool
 	integrityFailed    bool
+	invalidRecipients  map[string]string
 	createdSigners     []string
 	validSignatures    []signature
 	signatureFailed    bool
@@ -521,6 +527,13 @@ func readStatus(stderr string) operationStatus {
 			status.aes256 = len(fields) >= 3 && fields[2] == "9"
 		case "END_ENCRYPTION":
 			status.encrypted = true
+		case "INV_RECP":
+			if len(fields) >= 3 {
+				if status.invalidRecipients == nil {
+					status.invalidRecipients = make(map[string]string)
+				}
+				status.invalidRecipients[fields[2]] = fields[1]
+			}
 		case "DECRYPTION_KEY":
 			status.privateKey = true
 		case "DECRYPTION_OKAY":

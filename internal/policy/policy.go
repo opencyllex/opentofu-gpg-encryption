@@ -43,13 +43,19 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.GPG) == "" {
 		return errors.New("GPG policy must name a GnuPG executable")
 	}
-	for _, fingerprints := range [][]string{c.AuthorizedKeys, c.RetiredKeys} {
-		for i, value := range fingerprints {
+	for _, keys := range []struct {
+		option       string
+		fingerprints []string
+	}{
+		{"--authorized-key", c.AuthorizedKeys},
+		{"--retired-key", c.RetiredKeys},
+	} {
+		for i, value := range keys.fingerprints {
 			fingerprint, err := normalizeFingerprint(value)
 			if err != nil {
-				return err
+				return fmt.Errorf("%s: %w", keys.option, err)
 			}
-			fingerprints[i] = fingerprint
+			keys.fingerprints[i] = fingerprint
 		}
 	}
 	for _, fingerprint := range c.RetiredKeys {

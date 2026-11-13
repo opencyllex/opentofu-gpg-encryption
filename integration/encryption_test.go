@@ -243,8 +243,8 @@ func TestIntegration(t *testing.T) {
 		configure(t, master, "local-user "+first+"\nlocal-user "+second)
 		log := h.startTrace(t)
 		ciphertext := h.method(t, "encrypt", master, message, nil, append(both, "--gpg", h.wrapper)...)
-		if operations := traceOperations(t, log); operations["sign"] != 1 {
-			t.Fatalf("a payload write did not sign exactly once: %v", operations)
+		if operations := traceOperations(t, log); operations["sign"] != 1 || operations["encrypt"] != 2 {
+			t.Fatalf("a payload write must sign once and encrypt twice (recipient check and payload): %v", operations)
 		}
 		for _, home := range []string{firstHome, secondHome} {
 			if got := h.method(t, "decrypt", home, ciphertext, nil, both...); !bytes.Equal(got, message) {
@@ -703,7 +703,8 @@ func TestIntegration(t *testing.T) {
 			if key == nil {
 				flags = options
 			}
-			stderr := h.reject(t, "encrypt", home, message, key, "GPG encryption failed", flags...)
+			diagnostic := "public key " + second + " is not verified in your GPG keyring; confirm its fingerprint with its owner, then run gpg --quick-lsign-key " + second
+			stderr := h.reject(t, "encrypt", home, message, key, diagnostic, flags...)
 			if strings.Contains(stderr, "--no-literal") {
 				t.Fatalf("encryption diagnostics included the no-literal note: %s", stderr)
 			}
