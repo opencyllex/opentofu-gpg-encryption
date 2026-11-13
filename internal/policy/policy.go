@@ -85,10 +85,10 @@ func (c *Config) UnmarshalJSON(input []byte) error {
 
 func normalizeFingerprint(value string) (string, error) {
 	if len(value) != 40 && len(value) != 64 {
-		return "", errors.New("key must be a full GPG primary-key fingerprint (40 or 64 hexadecimal characters)")
+		return "", fmt.Errorf("key %q must be a full GPG primary-key fingerprint (40 or 64 hexadecimal characters)", value)
 	}
 	if _, err := hex.DecodeString(value); err != nil {
-		return "", errors.New("key fingerprint must contain only hexadecimal characters")
+		return "", fmt.Errorf("key fingerprint %q must contain only hexadecimal characters", value)
 	}
 	return strings.ToUpper(value), nil
 }

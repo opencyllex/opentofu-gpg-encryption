@@ -325,7 +325,7 @@ func (h harness) testRemotePolicyChanges(t *testing.T) {
 		if output, err := h.runTofu(t, project, "apply", "-replace=terraform_data.gpg_rewrite", "-auto-approve", "-input=false", "-no-color"); err == nil || !strings.Contains(strings.Join(strings.Fields(output), " "), "key "+retired+" has expired") {
 			t.Fatalf("the normal removal rewrite accepted an expired recipient: err=%v\n%s", err, output)
 		}
-		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["encrypt"] != 0 {
+		if operations := traceOperations(t, log); operations["sign"] != 0 {
 			t.Fatalf("an expired remote recipient was detected after signing: %v", operations)
 		}
 		unchanged, currentWrites := backend.snapshot()

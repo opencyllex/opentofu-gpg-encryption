@@ -66,6 +66,20 @@ func TestInvalidArguments(t *testing.T) {
 	}
 }
 
+func TestInvalidFingerprintDiagnostics(t *testing.T) {
+	for _, option := range []string{"--authorized-key", "--retired-key"} {
+		for _, value := range []string{"ABCDEF", strings.Repeat("G", 40)} {
+			t.Run(option+" "+value, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := cli.Run(t.Context(), []string{"policy", option, value}, strings.NewReader("null"), &stdout, &stderr, "dev")
+				if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), `"`+value+`"`) || !strings.Contains(stderr.String(), "fingerprint") {
+					t.Fatalf("invalid fingerprint lost its diagnostic context: code=%d, stdout=%q, stderr=%q", code, &stdout, &stderr)
+				}
+			})
+		}
+	}
+}
+
 func TestMissingGPG(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cli.Run(t.Context(), []string{"encrypt", "--gpg", "nonexistent-gpg-for-test"}, strings.NewReader(`{"payload":"AQ=="}`), &stdout, &stderr, "dev")

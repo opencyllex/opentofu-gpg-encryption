@@ -243,8 +243,8 @@ func TestIntegration(t *testing.T) {
 		configure(t, master, "local-user "+first+"\nlocal-user "+second)
 		log := h.startTrace(t)
 		ciphertext := h.method(t, "encrypt", master, message, nil, append(both, "--gpg", h.wrapper)...)
-		if operations := traceOperations(t, log); operations["sign"] != 1 || operations["encrypt"] != 1 {
-			t.Fatalf("a payload write did not use one signing and one encryption command: %v", operations)
+		if operations := traceOperations(t, log); operations["sign"] != 1 {
+			t.Fatalf("a payload write did not sign exactly once: %v", operations)
 		}
 		for _, home := range []string{firstHome, secondHome} {
 			if got := h.method(t, "decrypt", home, ciphertext, nil, both...); !bytes.Equal(got, message) {
@@ -565,7 +565,7 @@ func TestIntegration(t *testing.T) {
 					policy := h.policy(t, home, "null", options...)
 					h.reject(t, "encrypt", home, message, policy.Keys.EncryptionKey, "key "+retired+" has expired")
 				}
-				if operations := traceOperations(t, log); operations["sign"] != 0 || operations["encrypt"] != 0 {
+				if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 {
 					t.Fatalf("expired recipient was detected after a private write operation: %v", operations)
 				}
 
@@ -668,15 +668,53 @@ func TestIntegration(t *testing.T) {
 		h.reject(t, "decrypt", publicHome, ciphertext, nil, "GPG decryption failed", both...)
 	})
 
-	t.Run("untrusted recipient diagnostics omit the no-literal note", func(t *testing.T) {
+	t.Run("missing recipients are identified before signing", func(t *testing.T) {
+		home := h.home(t)
+		h.gpgCommand(t, home, h.gpgCommand(t, master, nil, "--export-secret-keys", first), "--import")
+		log := h.startTrace(t)
+		for _, options := range [][]string{both, {"--authorized-key", second, "--authorized-key", first}} {
+			options = append(slices.Clone(options), "--gpg", h.wrapper)
+			diagnostic := "public key " + second + " is not in your GPG keyring; import and verify it"
+			h.reject(t, "encrypt", home, message, nil, diagnostic, options...)
+			policy := h.policy(t, home, "null", options...)
+			h.reject(t, "encrypt", home, message, policy.Keys.EncryptionKey, diagnostic)
+		}
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 {
+			t.Fatalf("a missing recipient was detected after a private-key operation: %v", operations)
+		}
+		h.gpgCommand(t, home, public, "--import")
+		ciphertext := h.method(t, "encrypt", home, message, nil, both...)
+		if got := h.method(t, "decrypt", secondHome, ciphertext, nil, both...); !bytes.Equal(got, message) {
+			t.Fatal("importing the missing public key did not restore shared writes")
+		}
+	})
+
+	t.Run("untrusted recipients fail before signing without the no-literal note", func(t *testing.T) {
 		home := h.home(t)
 		h.gpgCommand(t, home, h.gpgCommand(t, master, nil, "--export-secret-keys", first), "--import")
 		h.gpgCommand(t, home, public, "--import")
 		configure(t, home, "trust-model pgp")
 		h.gpgCommand(t, home, []byte(first+":6:\n"), "--import-ownertrust")
-		stderr := h.reject(t, "encrypt", home, message, nil, "GPG encryption failed", both...)
-		if strings.Contains(stderr, "--no-literal") {
-			t.Fatalf("encryption diagnostics included the no-literal note: %s", stderr)
+		log := h.startTrace(t)
+		options := append(slices.Clone(both), "--gpg", h.wrapper)
+		policy := h.policy(t, home, "null", options...)
+		for _, key := range [][]byte{nil, policy.Keys.EncryptionKey} {
+			var flags []string
+			if key == nil {
+				flags = options
+			}
+			stderr := h.reject(t, "encrypt", home, message, key, "GPG encryption failed", flags...)
+			if strings.Contains(stderr, "--no-literal") {
+				t.Fatalf("encryption diagnostics included the no-literal note: %s", stderr)
+			}
+		}
+		if operations := traceOperations(t, log); operations["sign"] != 0 || operations["decrypt"] != 0 {
+			t.Fatalf("an untrusted recipient was detected after a private-key operation: %v", operations)
+		}
+		h.gpgCommand(t, home, nil, "--quick-lsign-key", second)
+		ciphertext := h.method(t, "encrypt", home, message, policy.Keys.EncryptionKey)
+		if got := h.method(t, "decrypt", secondHome, ciphertext, nil, both...); !bytes.Equal(got, message) {
+			t.Fatal("locally signing the recipient did not restore shared writes")
 		}
 	})
 

@@ -130,11 +130,13 @@ freshness or bind data to one project.
   with `--authorized-key`, including case variants. If either role is supplied,
   disable implicit authorization; a configuration with only retired keys must not write.
   Transport retired-key authorization only in the current trusted policy, never stored metadata.
-- Before signing, require usable encryption capability (uppercase `E` in GPG's
-  public-key listing) for every active authorized key. Diagnose expired primary
-  keys and encryption subkeys by primary fingerprint, with renewal or retirement
-  guidance. One unusable recipient blocks every member's writes. An expired
-  encryption subkey must not block another usable encryption key for that identity.
+- Before signing, test encryption of empty input to every active authorized key
+  under GPG's own trust model and discard the output. This requires no private-key
+  operation. Use public-key listings only to explain failures, including missing
+  keys and expired primary keys or encryption subkeys, by primary fingerprint
+  with import, renewal, or retirement guidance. One unusable or unverified
+  recipient blocks every member's writes. An expired encryption subkey must not
+  block another usable encryption key for that identity.
 - Sign actual payloads before encryption and reject every unauthorized signer.
   Encrypt signed OpenPGP packets with `--no-literal` to avoid adding a literal
   wrapper that would prevent decryption from verifying the inner signatures.
